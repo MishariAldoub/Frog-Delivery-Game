@@ -13,15 +13,13 @@ extends RigidBody2D
 ## Total outside width of the rear pizza tray.
 @export var caddy_width := 100
 ## Height of the front/rear tray walls. Around 80-90 is forgiving without becoming a tall basket.
-@export var caddy_wall_height := 72
+@export var caddy_wall_height := 60
 ## Thickness of the front/rear tray walls.
 @export var caddy_wall_thickness := 13
 ## Thickness of the tray floor collision.
 @export var caddy_floor_thickness := 24.0
 ## Small invisible inward lips near the top that catch pizzas during normal ramp tilts.
-@export var caddy_top_lip_size := Vector2(20, 8)
-## Partial cover pieces that make the caddy behave like a shallow pizza delivery slot.
-@export var caddy_cover_size := Vector2(34, 10)
+@export var caddy_top_lip_size := Vector2(0, 0)
 ## Extra X offset for the rear/back wall. Use small values to fine-tune corner overlap.
 @export var caddy_rear_wall_x_offset := 0.0
 ## Extra X offset for the front wall near the frog. Use small values to fine-tune corner overlap.
@@ -104,8 +102,6 @@ func _build_pizza_caddy_collision() -> void:
 	_add_rect_collision("PizzaCaddyFrontWall", Vector2(get_caddy_front_wall_x(), get_caddy_wall_center_y()), Vector2(caddy_wall_thickness, caddy_wall_height))
 	_add_rect_collision("PizzaCaddyRearTopLip", Vector2(get_caddy_inner_left_x() + caddy_top_lip_size.x * 0.5, get_caddy_top_y() + caddy_top_lip_size.y * 0.5), caddy_top_lip_size)
 	_add_rect_collision("PizzaCaddyFrontTopLip", Vector2(get_caddy_inner_right_x() - caddy_top_lip_size.x * 0.5, get_caddy_top_y() + caddy_top_lip_size.y * 0.5), caddy_top_lip_size)
-	_add_rect_collision("PizzaCaddyRearCover", Vector2(get_caddy_inner_left_x() + caddy_cover_size.x * 0.5, get_caddy_top_y() + caddy_cover_size.y * 0.5), caddy_cover_size)
-	_add_rect_collision("PizzaCaddyFrontCover", Vector2(get_caddy_inner_right_x() - caddy_cover_size.x * 0.5, get_caddy_top_y() + caddy_cover_size.y * 0.5), caddy_cover_size)
 
 func _add_rect_collision(shape_name: String, local_position: Vector2, size: Vector2) -> void:
 	var shape_node := CollisionShape2D.new()
@@ -145,8 +141,6 @@ func _draw() -> void:
 	draw_rect(Rect2(Vector2(CADDY_CENTER_X - caddy_width * 0.5, CADDY_FLOOR_CENTER_Y - caddy_floor_thickness * 0.5), Vector2(caddy_width, caddy_floor_thickness)), Color("#825339"))
 	draw_rect(Rect2(Vector2(get_caddy_rear_wall_x() - caddy_wall_thickness * 0.5, get_caddy_wall_center_y() - caddy_wall_height * 0.5), Vector2(caddy_wall_thickness, caddy_wall_height)), Color("#825339"))
 	draw_rect(Rect2(Vector2(get_caddy_front_wall_x() - caddy_wall_thickness * 0.5, get_caddy_wall_center_y() - caddy_wall_height * 0.5), Vector2(caddy_wall_thickness, caddy_wall_height)), Color("#825339"))
-	draw_rect(Rect2(Vector2(get_caddy_inner_left_x(), get_caddy_top_y()), caddy_cover_size), Color("#9b6847"))
-	draw_rect(Rect2(Vector2(get_caddy_inner_right_x() - caddy_cover_size.x, get_caddy_top_y()), caddy_cover_size), Color("#9b6847"))
 	draw_line(Vector2(18, -32), Vector2(45, -72), Color("#272727"), 6.0)
 	draw_line(Vector2(45, -72), Vector2(72, -67), Color("#272727"), 5.0)
 	draw_circle(Vector2(-42, 0), 22.0, Color("#161616"))

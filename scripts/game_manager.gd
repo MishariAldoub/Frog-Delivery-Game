@@ -1,9 +1,9 @@
 extends Node2D
 
-const Road = preload("res://scripts/road.gd")
+const LevelTestScene = preload("res://scenes/LevelTest.tscn")
 const Player = preload("res://scripts/player.gd")
-const Pizza = preload("res://scripts/pizza.gd")
-const HUD = preload("res://scripts/hud.gd")
+const PizzaBoxScene = preload("res://scenes/PizzaBox.tscn")
+const HUDScene = preload("res://scenes/HUD.tscn")
 
 @export_group("Level")
 ## Number of pizza boxes spawned at the start of the level.
@@ -72,7 +72,7 @@ func restart_level() -> void:
 	get_tree().reload_current_scene()
 
 func _build_level() -> void:
-	road = Road.new()
+	road = LevelTestScene.instantiate()
 	road.finish_x = finish_x
 	add_child(road)
 
@@ -83,7 +83,7 @@ func _build_level() -> void:
 
 	_spawn_pizzas()
 
-	hud = HUD.new()
+	hud = HUDScene.instantiate()
 	add_child(hud)
 	hud.restart_requested.connect(restart_level)
 	hud.set_run_status(pizza_count, 0.0)
@@ -91,7 +91,7 @@ func _build_level() -> void:
 func _spawn_pizzas() -> void:
 	var base = player.get_stack_anchor_global()
 	for i in range(pizza_count):
-		var pizza := Pizza.new()
+		var pizza := PizzaBoxScene.instantiate() as RigidBody2D
 		pizza.position = base + Vector2(randf_range(-2.5, 2.5), -i * 13.0)
 		pizza.rotation = randf_range(-0.045, 0.045)
 		pizza.name = "Pizza%02d" % i

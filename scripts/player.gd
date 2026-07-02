@@ -1,8 +1,8 @@
 extends Node2D
 
-const Moped = preload("res://scripts/moped.gd")
-const Frog = preload("res://scripts/frog.gd")
-const Tongue = preload("res://scripts/tongue.gd")
+const MopedScene = preload("res://scenes/Moped.tscn")
+const FrogScene = preload("res://scenes/Frog.tscn")
+const TongueScene = preload("res://scenes/Tongue.tscn")
 
 var moped: RigidBody2D
 var frog: Node2D
@@ -18,10 +18,10 @@ var magnet_zone_size := Vector2(74, 58)
 var load_zone_size := Vector2(62, 48)
 
 func _ready() -> void:
-	moped = Moped.new()
+	moped = MopedScene.instantiate() as RigidBody2D
 	add_child(moped)
 
-	frog = Frog.new()
+	frog = FrogScene.instantiate() as Node2D
 	moped.add_child(frog)
 	frog.position = Vector2(39, -47)
 
@@ -30,7 +30,7 @@ func _ready() -> void:
 	magnet_zone = _make_zone("MagnetZone", zone_center, magnet_zone_size)
 	load_zone = _make_zone("LoadZone", zone_center, load_zone_size)
 
-	tongue = Tongue.new()
+	tongue = TongueScene.instantiate() as Node2D
 	tongue.player = self
 	add_child(tongue)
 
