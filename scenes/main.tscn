@@ -1,0 +1,7 @@
+[gd_scene format=3 uid="uid://84vp7a61g2xq"]
+
+[ext_resource type="Script" uid="uid://bwqmycl7ypcji" path="res://scripts/game_manager.gd" id="1"]
+
+[node name="GameManager" type="Node2D" unique_id=1207256037]
+script = ExtResource("1")
+pizza_count = 2
