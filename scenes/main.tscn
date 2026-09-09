@@ -4,4 +4,3 @@
 
 [node name="GameManager" type="Node2D" unique_id=369950196]
 script = ExtResource("1")
-pizza_count = 6
