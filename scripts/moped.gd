@@ -1,13 +1,31 @@
 extends RigidBody2D
 
-@export var acceleration := 4000
-@export var reverse_acceleration := 2000
+@export_group("Handling")
+@export var acceleration := 1550.0
+@export var reverse_acceleration := 900.0
 @export var brake_strength := 1350.0
-@export var max_forward_speed := 5000
-@export var max_reverse_speed := 3000
-@export var lean_acceleration := 20
-@export var lean_torque := 48000.0
-@export var max_angular_speed := 7.5
+@export var max_forward_speed := 5000.0
+@export var max_reverse_speed := 3000.0
+@export var ground_lean_torque := 32000.0
+@export var air_lean_torque := 52000.0
+@export var ground_lean_acceleration := 3.2
+@export var air_lean_acceleration := 6.5
+@export var max_ground_angular_speed := 3.6
+@export var max_air_angular_speed := 5.6
+@export var active_ground_lean_angular_damp := 1.35
+@export_range(0.0, 1.0, 0.05) var airborne_control_multiplier := 0.35
+
+@export_group("Body Weight")
+@export var moped_mass := 9.5
+@export var moped_gravity_scale := 1.45
+@export var ground_linear_damp := 0.09
+@export var air_linear_damp := 0.035
+@export var ground_angular_damp := 2.65
+@export var air_angular_damp := 1.65
+@export var angular_inertia := 22000.0
+@export var landing_settle_time := 0.18
+@export var landing_linear_damp := 0.22
+@export var landing_angular_damp := 3.4
 
 @export_group("Pizza Caddy")
 ## Total outside width of the rear pizza tray.
@@ -26,17 +44,21 @@ extends RigidBody2D
 @export var caddy_front_wall_x_offset := 0.0
 
 var wheel_spin := 0.0
+var was_grounded := false
+var landing_settle_timer := 0.0
 
 const CADDY_CENTER_X := -48.0
 const CADDY_FLOOR_CENTER_Y := -39.0
 
 func _ready() -> void:
-	mass = 6.2
-	gravity_scale = 1.35
-	linear_damp = 0.03
-	angular_damp = 1.15
+	mass = moped_mass
+	gravity_scale = moped_gravity_scale
+	linear_damp = ground_linear_damp
+	angular_damp = ground_angular_damp
+	inertia = angular_inertia
 	contact_monitor = true
 	max_contacts_reported = 8
+	continuous_cd = RigidBody2D.CCD_MODE_CAST_SHAPE
 	collision_layer = 1
 	collision_mask = 1
 	physics_material_override = PhysicsMaterial.new()
@@ -63,35 +85,77 @@ func _ready() -> void:
 func _physics_process(delta: float) -> void:
 	var throttle_pressed := _is_pressed("accelerate", KEY_W)
 	var brake_pressed := _is_pressed("brake_reverse", KEY_S)
-	var velocity := linear_velocity
+	var lean := _get_lean_input()
+	var grounded := _is_grounded()
+	if grounded and not was_grounded:
+		landing_settle_timer = landing_settle_time
+	was_grounded = grounded
+	landing_settle_timer = max(landing_settle_timer - delta, 0.0)
+	_update_body_damping(grounded, lean)
 
 	if throttle_pressed:
-		velocity.x = min(velocity.x + acceleration * delta, max_forward_speed)
-		# The first press must always produce visible motion, even if the bike is nudged into terrain.
-		if velocity.x < 75.0:
-			velocity.x = 75.0
+		_apply_engine_force(acceleration, max_forward_speed, grounded)
 
 	if brake_pressed:
+		var velocity := linear_velocity
 		if velocity.x > 20.0:
 			velocity.x = move_toward(velocity.x, 0.0, brake_strength * delta)
 		else:
 			velocity.x = max(velocity.x - reverse_acceleration * delta, -max_reverse_speed)
+		linear_velocity = velocity
 
-	linear_velocity = velocity
+	_apply_lean_control(lean, grounded, delta)
 
+	wheel_spin += linear_velocity.x * delta * 0.05
+	queue_redraw()
+
+func _get_lean_input() -> float:
 	var lean := Input.get_axis("lean_left", "lean_right")
 	if _is_pressed("lean_left", KEY_A):
 		lean -= 1.0
 	if _is_pressed("lean_right", KEY_D):
 		lean += 1.0
-	lean = clamp(lean, -1.0, 1.0)
+	return clamp(lean, -1.0, 1.0)
 
-	# Torque keeps the lean physical; angular velocity control makes it arcade-responsive.
-	apply_torque(lean * lean_torque)
-	angular_velocity = clamp(angular_velocity + lean * lean_acceleration * delta, -max_angular_speed, max_angular_speed)
+func _apply_engine_force(throttle_acceleration: float, speed_limit: float, grounded: bool) -> void:
+	var forward := Vector2.RIGHT.rotated(rotation)
+	var forward_speed := linear_velocity.dot(forward)
+	if forward_speed >= speed_limit:
+		return
 
-	wheel_spin += linear_velocity.x * delta * 0.05
-	queue_redraw()
+	var control_multiplier := 1.0 if grounded else airborne_control_multiplier
+	var speed_factor = clamp(1.0 - forward_speed / speed_limit, 0.18, 1.0)
+	apply_central_force(forward * throttle_acceleration * mass * control_multiplier * speed_factor)
+
+func _apply_lean_control(lean: float, grounded: bool, delta: float) -> void:
+	if is_zero_approx(lean):
+		return
+
+	var torque := ground_lean_torque if grounded else air_lean_torque
+	var angular_acceleration := ground_lean_acceleration if grounded else air_lean_acceleration
+	var angular_speed_limit := max_ground_angular_speed if grounded else max_air_angular_speed
+
+	# A small angular velocity assist keeps lean readable, while torque carries the physical weight.
+	apply_torque(lean * torque)
+	angular_velocity = clamp(angular_velocity + lean * angular_acceleration * delta, -angular_speed_limit, angular_speed_limit)
+
+func _update_body_damping(grounded: bool, lean: float) -> void:
+	if landing_settle_timer > 0.0:
+		linear_damp = landing_linear_damp
+		angular_damp = landing_angular_damp
+		return
+
+	linear_damp = ground_linear_damp if grounded else air_linear_damp
+	if grounded and not is_zero_approx(lean):
+		angular_damp = active_ground_lean_angular_damp
+	else:
+		angular_damp = ground_angular_damp if grounded else air_angular_damp
+
+func _is_grounded() -> bool:
+	for body in get_colliding_bodies():
+		if body is StaticBody2D:
+			return true
+	return false
 
 func _is_pressed(action_name: String, fallback_key: Key) -> bool:
 	return Input.is_action_pressed(action_name) or Input.is_key_pressed(fallback_key)

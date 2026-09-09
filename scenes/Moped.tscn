@@ -1,6 +1,8 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://b8dg5ylmvfv11"]
 
-[ext_resource type="Script" path="res://scripts/moped.gd" id="1"]
+[ext_resource type="Script" uid="uid://c3ik2vhrds40p" path="res://scripts/moped.gd" id="1"]
 
-[node name="Moped" type="RigidBody2D"]
+[node name="Moped" type="RigidBody2D" unique_id=164084753]
 script = ExtResource("1")
+acceleration = 3000.0
+reverse_acceleration = 2000.0

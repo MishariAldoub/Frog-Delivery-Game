@@ -8,6 +8,7 @@
 - The tongue grabs loose pizzas and pulls them toward a mouse-controlled target using spring-like force.
 - The MagnetZone and LoadZone only provide gentle alignment/counting logic inside the caddy.
 - Loaded pizzas remain physical and can still wobble or fall loose.
+- The test level now uses editable whitebox `EditableTerrain` instances instead of generated road collision.
 
 ## Current Tuning Values
 
@@ -41,12 +42,14 @@
 
 - The caddy is still generated in `moped.gd` because extracting compound collision safely needs more care.
 - `PizzaCaddy.tscn` exists as an organization target, but the active physical caddy remains part of `Moped.tscn` behavior.
+- Terrain points are edited through exported polygon arrays or by editing the child `Polygon2D` and toggling `sync_from_polygon_now`.
 - Godot is not available on PATH in the current automation environment, so runtime checks must be done in the editor.
 
 ## Next Steps
 
 - Playtest caddy retention on normal ramps, bumps, and jumps.
 - Tune caddy cover size and wall height before adding content.
+- Use `EditableTerrain` in `LevelTest.tscn` for fast whitebox level iteration.
 - Extract caddy collision into a reusable child scene only after verifying it can move with the moped without changing physics behavior.
 - Add debug visibility toggles for MagnetZone and LoadZone.
 - Add a short reset/recover flow if the moped flips over.

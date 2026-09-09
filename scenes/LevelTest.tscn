@@ -1,6 +1,25 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://ddppiiiqnpkf8"]
 
-[ext_resource type="Script" path="res://scripts/road.gd" id="1"]
+[ext_resource type="Script" uid="uid://3x2atd16y5hn" path="res://scripts/road.gd" id="1"]
+[ext_resource type="PackedScene" uid="uid://crrud81xpu7jw" path="res://scenes/environment/EditableTerrain.tscn" id="2"]
 
-[node name="LevelTest" type="Node2D"]
+[node name="LevelTest" type="Node2D" unique_id=2959916]
 script = ExtResource("1")
+
+[node name="EditableTerrain_FlatStart" parent="." unique_id=798724873 instance=ExtResource("2")]
+points = PackedVector2Array(-300, 520, 520, 520, 520, 760, -300, 760)
+
+[node name="EditableTerrain_BumpsAndHill" parent="." unique_id=979155491 instance=ExtResource("2")]
+points = PackedVector2Array(520, 520, 600, 502, 680, 520, 760, 494, 850, 520, 980, 480, 1140, 448, 1350, 520, 1350, 760, 520, 760)
+
+[node name="EditableTerrain_MidRun" parent="." unique_id=962552390 instance=ExtResource("2")]
+points = PackedVector2Array(1350, 520, 1510, 492, 1620, 498, 1900, 520, 2180, 415, 2380, 545, 2600, 545, 2600, 760, 1350.875, 760)
+
+[node name="EditableTerrain_Downhill" parent="." unique_id=697359566 instance=ExtResource("2")]
+points = PackedVector2Array(2600, 545, 3220, 640, 3300, 640, 3460, 582, 3720, 640, 4100, 640, 4100, 760, 2600, 760)
+
+[node name="EditableTerrain_FinishFlat" parent="." unique_id=415835455 instance=ExtResource("2")]
+points = PackedVector2Array(4100.01, 640, 4800.005, 640, 4796.805, 760, 4100, 760)
+
+[node name="GeneratedTerrainBackup" type="Node2D" parent="." unique_id=1665705640]
+visible = false

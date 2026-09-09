@@ -1,87 +1,159 @@
 extends Node2D
 
-@export var finish_x := 4300.0
+@export var finish_x := 4300.0:
+	set(value):
+		finish_x = value
+		_update_finish_line()
+@export var use_unified_terrain_collision := true
+@export var show_collision_debug := false:
+	set(value):
+		show_collision_debug = value
+		_update_collision_debug()
 
-var terrain_points: PackedVector2Array
+const TERRAIN_COLLIDER_NAME := "UnifiedTerrainCollision"
+const TERRAIN_DEBUG_NAME := "TerrainCollisionDebug"
+const TERRAIN_BOTTOM_Y := 760.0
 
 func _ready() -> void:
-	terrain_points = _make_terrain()
-	_build_collision()
-	queue_redraw()
+	_rebuild_terrain_collision()
+	_update_finish_line()
 
-func _make_terrain() -> PackedVector2Array:
-	var points := PackedVector2Array()
-	var x := -300.0
-	while x <= finish_x + 500.0:
-		var y := 520.0
-		y -= _bump(x, 600.0, 18.0)
-		y -= _bump(x, 720.0, 25.0)
-		if x > 900.0 and x < 1350.0:
-			y -= sin((x - 900.0) / 450.0 * PI) * 72.0
-		y -= _bump(x, 1510.0, 28.0)
-		y -= _bump(x, 1620.0, 22.0)
-		if x > 1900.0 and x < 2180.0:
-			y -= _smooth_step((x - 1900.0) / 280.0) * 105.0
-		if x > 2180.0 and x < 2380.0:
-			y = lerp(415.0, 545.0, _smooth_step((x - 2180.0) / 200.0))
-		if x > 2600.0 and x < 3220.0:
-			y += _smooth_step((x - 2600.0) / 620.0) * 95.0
-		if x > 3300.0 and x < 3720.0:
-			y += 95.0
-			y -= sin((x - 3300.0) / 420.0 * PI) * 58.0
-		points.append(Vector2(x, y))
-		x += 24.0
-	return points
-
-func _bump(x: float, center: float, height: float) -> float:
-	var width := 64.0
-	var t = clamp(1.0 - abs(x - center) / width, 0.0, 1.0)
-	return sin(t * PI * 0.5) * height
-
-func _smooth_step(t: float) -> float:
-	var clamped = clamp(t, 0.0, 1.0)
-	return clamped * clamped * (3.0 - 2.0 * clamped)
-
-func _build_collision() -> void:
-	var body := StaticBody2D.new()
-	body.name = "RoadCollision"
-	add_child(body)
-
-	for i in range(terrain_points.size() - 1):
-		var segment := CollisionShape2D.new()
-		var shape := SegmentShape2D.new()
-		shape.a = terrain_points[i]
-		shape.b = terrain_points[i + 1]
-		segment.shape = shape
-		body.add_child(segment)
-
-	var finish_area := Area2D.new()
-	finish_area.name = "FinishLine"
-	finish_area.position = Vector2(finish_x, 340)
-	add_child(finish_area)
-
-	var finish_shape_node := CollisionShape2D.new()
-	var finish_shape := RectangleShape2D.new()
-	finish_shape.size = Vector2(20, 360)
-	finish_shape_node.shape = finish_shape
-	finish_area.add_child(finish_shape_node)
-
-func _draw() -> void:
-	if terrain_points.is_empty():
+func _rebuild_terrain_collision() -> void:
+	if not is_inside_tree():
 		return
 
-	var fill := PackedVector2Array(terrain_points)
-	var last_point := terrain_points[terrain_points.size() - 1]
-	fill.append(Vector2(last_point.x, 760))
-	fill.append(Vector2(terrain_points[0].x, 760))
-	draw_colored_polygon(fill, Color("#5a3f2b"))
+	var terrain_nodes := _get_terrain_nodes()
+	for terrain in terrain_nodes:
+		var chunk_collision := terrain.get_node_or_null("CollisionPolygon2D") as CollisionPolygon2D
+		if chunk_collision:
+			chunk_collision.disabled = use_unified_terrain_collision
 
-	for i in range(terrain_points.size() - 1):
-		draw_line(terrain_points[i], terrain_points[i + 1], Color("#304047"), 10.0)
-		draw_line(terrain_points[i] + Vector2(0, 6), terrain_points[i + 1] + Vector2(0, 6), Color("#6f5842"), 6.0)
+	var existing_collision := get_node_or_null(TERRAIN_COLLIDER_NAME)
+	if existing_collision:
+		remove_child(existing_collision)
+		existing_collision.queue_free()
 
-	draw_rect(Rect2(Vector2(finish_x - 10, 250), Vector2(20, 280)), Color("#eeeeee"))
-	for y in range(250, 530, 28):
-		var offset := 0 if (int(y / 28) % 2 == 0) else 10
-		draw_rect(Rect2(Vector2(finish_x - 10 + offset, y), Vector2(10, 14)), Color.BLACK)
-		draw_rect(Rect2(Vector2(finish_x + offset, y + 14), Vector2(10, 14)), Color.BLACK)
+	if not use_unified_terrain_collision:
+		_update_collision_debug()
+		return
+
+	var top_points := _get_continuous_terrain_top_points(terrain_nodes)
+	if top_points.size() < 2:
+		_update_collision_debug()
+		return
+
+	var terrain_body := StaticBody2D.new()
+	terrain_body.name = TERRAIN_COLLIDER_NAME
+	terrain_body.collision_layer = 1
+	terrain_body.collision_mask = 1
+	add_child(terrain_body)
+
+	var collision_shape := CollisionPolygon2D.new()
+	collision_shape.name = "CollisionPolygon2D"
+	collision_shape.polygon = _make_solid_terrain_polygon(top_points)
+	terrain_body.add_child(collision_shape)
+	_update_collision_debug()
+
+func _get_terrain_nodes() -> Array[Node]:
+	var terrain_nodes: Array[Node] = []
+	for child in get_children():
+		if child == get_node_or_null(TERRAIN_COLLIDER_NAME) or child == get_node_or_null(TERRAIN_DEBUG_NAME):
+			continue
+		if child is StaticBody2D and child.has_method("sync_visuals_and_collision"):
+			terrain_nodes.append(child)
+
+	terrain_nodes.sort_custom(func(a: Node, b: Node) -> bool:
+		return _get_leftmost_point_x(a.points) < _get_leftmost_point_x(b.points)
+	)
+	return terrain_nodes
+
+func _get_leftmost_point_x(points: PackedVector2Array) -> float:
+	var left := INF
+	for point in points:
+		left = min(left, point.x)
+	return left
+
+func _get_continuous_terrain_top_points(terrain_nodes: Array[Node]) -> PackedVector2Array:
+	var top_points := PackedVector2Array()
+	for terrain in terrain_nodes:
+		var chunk_points: PackedVector2Array = terrain.points
+		if chunk_points.size() < 2:
+			continue
+
+		var chunk_top := _get_top_edge_points(chunk_points)
+		for point in chunk_top:
+			if top_points.size() > 0 and top_points[top_points.size() - 1].distance_to(point) <= 0.05:
+				continue
+			top_points.append(point)
+	return top_points
+
+func _get_top_edge_points(points: PackedVector2Array) -> PackedVector2Array:
+	var bottom_start := -1
+	for index in range(points.size()):
+		if is_equal_approx(points[index].y, TERRAIN_BOTTOM_Y):
+			bottom_start = index
+			break
+
+	if bottom_start <= 0:
+		return points
+
+	var top := PackedVector2Array()
+	for index in range(bottom_start):
+		top.append(points[index])
+	return top
+
+func _make_solid_terrain_polygon(top_points: PackedVector2Array) -> PackedVector2Array:
+	var polygon := PackedVector2Array(top_points)
+	var last_top := top_points[top_points.size() - 1]
+	var first_top := top_points[0]
+	polygon.append(Vector2(last_top.x, TERRAIN_BOTTOM_Y))
+	polygon.append(Vector2(first_top.x, TERRAIN_BOTTOM_Y))
+	return polygon
+
+func _update_finish_line() -> void:
+	if not is_inside_tree():
+		return
+
+	var finish_area := get_node_or_null("FinishLine") as Area2D
+	if not finish_area:
+		finish_area = Area2D.new()
+		finish_area.name = "FinishLine"
+		add_child(finish_area)
+
+		var finish_shape_node := CollisionShape2D.new()
+		finish_shape_node.name = "CollisionShape2D"
+		var finish_shape := RectangleShape2D.new()
+		finish_shape.size = Vector2(20, 360)
+		finish_shape_node.shape = finish_shape
+		finish_area.add_child(finish_shape_node)
+
+	finish_area.position = Vector2(finish_x, 340)
+
+func _update_collision_debug() -> void:
+	if not is_inside_tree():
+		return
+
+	var existing_debug := get_node_or_null(TERRAIN_DEBUG_NAME)
+	if existing_debug:
+		existing_debug.queue_free()
+
+	if not show_collision_debug or not use_unified_terrain_collision:
+		return
+
+	var terrain_body := get_node_or_null(TERRAIN_COLLIDER_NAME)
+	if not terrain_body:
+		return
+
+	var collision_shape := terrain_body.get_node_or_null("CollisionPolygon2D") as CollisionPolygon2D
+	if not collision_shape:
+		return
+
+	var debug_line := Line2D.new()
+	debug_line.name = TERRAIN_DEBUG_NAME
+	debug_line.default_color = Color(0.1, 0.85, 1.0, 0.9)
+	debug_line.width = 4.0
+	debug_line.z_index = 100
+	for point in collision_shape.polygon:
+		debug_line.add_point(point)
+	debug_line.add_point(collision_shape.polygon[0])
+	add_child(debug_line)

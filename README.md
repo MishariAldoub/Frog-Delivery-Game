@@ -29,6 +29,7 @@ This is not a polished game. It is a playable mechanics test.
 
 - `scenes/Main.tscn`: main entry point with `GameManager`
 - `scenes/LevelTest.tscn`: prototype test level
+- `scenes/environment/EditableTerrain.tscn`: whitebox terrain pieces with matching visual and collision polygons
 - `scenes/Moped.tscn`: moped physics body
 - `scenes/Frog.tscn`: frog drawing
 - `scenes/PizzaBox.tscn`: pizza box rigid body
@@ -37,3 +38,7 @@ This is not a polished game. It is a playable mechanics test.
 - `scenes/PizzaCaddy.tscn`: placeholder scene for future safe caddy extraction
 
 Most gameplay code still lives in scripts. The refactor is intentionally gradual so the working prototype behavior stays intact.
+
+## Editing Terrain
+
+Open `res://scenes/LevelTest.tscn` and select an `EditableTerrain_*` node. Edit its `points` array in the Inspector to reshape the filled polygon and collision together. You can also edit the child `Polygon2D`, then toggle `sync_from_polygon_now` on the parent to copy that shape back into the terrain data.

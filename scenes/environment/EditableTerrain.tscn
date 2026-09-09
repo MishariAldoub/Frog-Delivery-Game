@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://crrud81xpu7jw"]
+
+[ext_resource type="Script" uid="uid://4sqyu72dg0jp" path="res://scripts/environment/editable_terrain.gd" id="1"]
+
+[node name="EditableTerrain" type="StaticBody2D" unique_id=226693246]
+script = ExtResource("1")
+points = PackedVector2Array(-300, 0, 300, 0, 300, 160, -300, 160)
+
+[node name="Polygon2D" type="Polygon2D" parent="." unique_id=1715645153]
+color = Color(0.3529412, 0.24705882, 0.16862746, 1)
+polygon = PackedVector2Array(-300, 0, 300, 0, 300, 160, -300, 160)
+
+[node name="CollisionPolygon2D" type="CollisionPolygon2D" parent="." unique_id=993328430]
+polygon = PackedVector2Array(-300, 0, 300, 0, 300, 160, -300, 160)
