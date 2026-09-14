@@ -1,6 +1,8 @@
 extends HumanAI
 class_name Scientist
 
+const HealthComponentScript = preload("res://scripts/components/health_component.gd")
+
 enum ScientistState {
 	WORKING,
 	WANDERING,
@@ -8,6 +10,19 @@ enum ScientistState {
 	SUSPICIOUS,
 	AIMING,
 	ATTACKING,
+}
+
+enum CombatState {
+	NORMAL,
+	GRABBED,
+	STUNNED,
+	DEAD,
+}
+
+enum GrabType {
+	NORMAL,
+	CEILING_STRANGLE,
+	REAR_DRAG,
 }
 
 @export_group("Scientist Routine")
@@ -43,7 +58,20 @@ enum ScientistState {
 @export var same_surface_vertical_tolerance = 72.0
 @export var blocked_repath_delay = 0.8
 
+@export_group("Combat Prototype")
+@export var recovery_stun_time = 0.85
+@export var grabbed_pull_strength = 18.0
+@export var grabbed_velocity_damping = 5.0
+@export var grabbed_max_speed = 640.0
+@export var ceiling_strangle_damage_per_second = 5.0
+@export var minimum_impact_speed = 220.0
+@export var impact_damage_multiplier = 0.045
+@export var max_impact_damage = 35.0
+@export var impact_damage_cooldown = 0.35
+
 var state = ScientistState.IDLE
+var combat_state = CombatState.NORMAL
+var grab_type = GrabType.NORMAL
 var state_time = 0.0
 var state_duration = 0.0
 var aim_time = 0.0
@@ -55,19 +83,43 @@ var destination = Vector2.ZERO
 var has_destination = false
 var blocked_repath_timer = 0.0
 var routine_initialized = false
+var grabbed_target_position = Vector2.ZERO
+var grabbed_by: Node2D
+var recovery_timer = 0.0
+var impact_cooldown_timer = 0.0
 
 var _work_points: Array[Node2D] = []
 var _wander_points: Array[Node2D] = []
 var _current_point: Node2D
 var _debug_label: Label
+var _health_component: HealthComponent
 
 func _ready() -> void:
 	super()
+	add_to_group("tongue_combat_target")
 	collision_layer = 2
 	collision_mask = 1
 	_build_body()
+	_build_health_component()
 	_build_debug_label()
 	_initialize_routine_after_navigation_sync()
+
+func _physics_process(delta: float) -> void:
+	if combat_state == CombatState.NORMAL:
+		super(delta)
+		return
+
+	impact_cooldown_timer = max(impact_cooldown_timer - delta, 0.0)
+	match combat_state:
+		CombatState.GRABBED:
+			_update_grabbed(delta)
+		CombatState.STUNNED:
+			_update_stunned(delta)
+		CombatState.DEAD:
+			_update_dead(delta)
+
+	_update_debug_label()
+	queue_redraw()
 
 func _initialize_routine_after_navigation_sync() -> void:
 	await get_tree().physics_frame
@@ -102,12 +154,21 @@ func _update_human_ai(delta: float) -> void:
 	_update_debug_label()
 
 func on_noise_heard(_world_position: Vector2, _suspicion_gain: float) -> void:
+	if combat_state != CombatState.NORMAL:
+		return
 	if suspicion >= suspicious_threshold and state < ScientistState.SUSPICIOUS:
 		_enter_state(ScientistState.SUSPICIOUS)
 
 func on_warning_received(_source_position: Vector2, _approximate_threat_position: Vector2, _severity: float) -> void:
+	if combat_state != CombatState.NORMAL:
+		return
 	if state < ScientistState.SUSPICIOUS:
 		_enter_state(ScientistState.SUSPICIOUS)
+
+func hear_noise(world_position: Vector2, loudness: float, radius: float, noise_type: StringName = &"generic", source: Node = null) -> void:
+	if combat_state != CombatState.NORMAL:
+		return
+	super(world_position, loudness, radius, noise_type, source)
 
 func _update_alert_state_from_suspicion() -> void:
 	if player_visible and suspicion >= attack_threshold and state != ScientistState.ATTACKING:
@@ -240,6 +301,8 @@ func _track_aim_toward(world_position: Vector2, delta: float) -> void:
 	set_facing_from_vector(aim_direction)
 
 func _fire_pistol() -> void:
+	if combat_state != CombatState.NORMAL:
+		return
 	var origin = get_eye_position() + aim_direction.normalized() * 22.0
 	var shot_direction = aim_direction.rotated(deg_to_rad(randf_range(-aim_spread_degrees, aim_spread_degrees))).normalized()
 	var end = origin + shot_direction * bullet_range
@@ -256,6 +319,8 @@ func _fire_pistol() -> void:
 	HumanNoise.emit_noise(self, origin, shot_noise_loudness, shot_noise_radius, &"pistol")
 
 func _enter_state(new_state: int) -> void:
+	if combat_state != CombatState.NORMAL:
+		return
 	if state == new_state:
 		return
 	state = new_state
@@ -379,7 +444,23 @@ func _build_body() -> void:
 	collision.position = Vector2(0, -22)
 	add_child(collision)
 
+func _build_health_component() -> void:
+	_health_component = get_node_or_null("HealthComponent") as HealthComponent
+	if not _health_component:
+		_health_component = HealthComponentScript.new()
+		_health_component.name = "HealthComponent"
+		add_child(_health_component)
+	var died_callable = Callable(self, "_on_health_died")
+	var health_changed_callable = Callable(self, "_on_health_changed")
+	if not _health_component.died.is_connected(died_callable):
+		_health_component.died.connect(died_callable)
+	if not _health_component.health_changed.is_connected(health_changed_callable):
+		_health_component.health_changed.connect(health_changed_callable)
+
 func _build_debug_label() -> void:
+	_debug_label = get_node_or_null("DebugAILabel") as Label
+	if _debug_label:
+		return
 	_debug_label = Label.new()
 	_debug_label.name = "DebugAILabel"
 	_debug_label.position = Vector2(-86, -96)
@@ -396,6 +477,14 @@ func _update_debug_label() -> void:
 		return
 	_debug_label.visible = show_debug_ai
 	if not show_debug_ai:
+		return
+	if combat_state != CombatState.NORMAL:
+		_debug_label.text = "State: %s\nHP: %d / %d\nGrab type: %s" % [
+			_get_combat_state_name(),
+			int(round(get_current_health())),
+			int(round(get_max_health())),
+			_get_grab_type_name(),
+		]
 		return
 	var target_text = "none"
 	if has_investigation_position:
@@ -426,6 +515,151 @@ func _get_state_name() -> String:
 			return "ATTACKING"
 	return "UNKNOWN"
 
+func take_damage(amount: float) -> void:
+	if _health_component:
+		_health_component.take_damage(amount)
+
+func heal(amount: float) -> void:
+	if _health_component:
+		_health_component.heal(amount)
+
+func die() -> void:
+	if _health_component:
+		_health_component.die()
+	else:
+		_on_health_died()
+
+func get_current_health() -> float:
+	return _health_component.current_health if _health_component else 0.0
+
+func get_max_health() -> float:
+	return _health_component.max_health if _health_component else 1.0
+
+func is_attack_from_behind(attacker_position: Vector2) -> bool:
+	var attacker_side = sign(attacker_position.x - global_position.x)
+	if is_zero_approx(attacker_side):
+		return false
+	return attacker_side == -facing_direction
+
+func get_tongue_target_position() -> Vector2:
+	var shape = get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if shape:
+		return shape.global_position
+	return global_position + Vector2(0, -24)
+
+func begin_tongue_grab(grabber: Node2D, grab_kind: int, tongue_target_position: Vector2) -> bool:
+	if combat_state == CombatState.DEAD or not _health_component or _health_component.is_dead:
+		return false
+	grabbed_by = grabber
+	grab_type = grab_kind
+	grabbed_target_position = tongue_target_position
+	combat_state = CombatState.GRABBED
+	recovery_timer = 0.0
+	impact_cooldown_timer = 0.0
+	has_destination = false
+	clear_navigation_target()
+	player_visible = false
+	velocity *= 0.35
+	_update_debug_label()
+	return true
+
+func update_tongue_grab(tongue_target_position: Vector2, delta: float) -> void:
+	if combat_state != CombatState.GRABBED:
+		return
+	grabbed_target_position = tongue_target_position
+	if grab_type == GrabType.CEILING_STRANGLE:
+		take_damage(ceiling_strangle_damage_per_second * delta)
+
+func release_tongue_grab() -> void:
+	if combat_state != CombatState.GRABBED:
+		return
+	grabbed_by = null
+	grabbed_target_position = Vector2.ZERO
+	grab_type = GrabType.NORMAL
+	if _health_component and _health_component.is_dead:
+		combat_state = CombatState.DEAD
+		return
+	combat_state = CombatState.STUNNED
+	recovery_timer = recovery_stun_time
+	clear_navigation_target()
+
+func _update_grabbed(delta: float) -> void:
+	var previous_velocity = velocity
+	velocity.y += gravity * delta
+	var displacement = grabbed_target_position - get_tongue_target_position()
+	var spring_velocity = displacement * grabbed_pull_strength
+	velocity = velocity.move_toward(spring_velocity, grabbed_velocity_damping * max(velocity.length(), 80.0) * delta)
+	velocity = velocity.limit_length(grabbed_max_speed)
+	move_and_slide()
+	_apply_impact_damage(previous_velocity)
+
+func _update_stunned(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y += gravity * delta
+	velocity.x = move_toward(velocity.x, 0.0, ground_deceleration * delta)
+	move_and_slide()
+	recovery_timer = max(recovery_timer - delta, 0.0)
+	if recovery_timer <= 0.0:
+		combat_state = CombatState.NORMAL
+		_enter_state(ScientistState.SUSPICIOUS if suspicion >= suspicious_threshold else ScientistState.IDLE)
+
+func _update_dead(delta: float) -> void:
+	if not is_on_floor():
+		velocity.y += gravity * delta
+	velocity.x = move_toward(velocity.x, 0.0, ground_deceleration * delta)
+	move_and_slide()
+
+func _apply_impact_damage(previous_velocity: Vector2) -> void:
+	if impact_cooldown_timer > 0.0:
+		return
+	for index in range(get_slide_collision_count()):
+		var collision = get_slide_collision(index)
+		var normal = collision.get_normal()
+		var impact_speed = max(0.0, previous_velocity.dot(-normal))
+		if impact_speed < minimum_impact_speed:
+			continue
+		var collider = collision.get_collider()
+		if not (collider is StaticBody2D or (collider is Node and collider.is_in_group("grapple_surface"))):
+			continue
+		var damage = clamp((impact_speed - minimum_impact_speed) * impact_damage_multiplier, 0.0, max_impact_damage)
+		if damage > 0.0:
+			take_damage(damage)
+			impact_cooldown_timer = impact_damage_cooldown
+			return
+
+func _on_health_changed(_current_health: float, _max_health: float) -> void:
+	queue_redraw()
+	_update_debug_label()
+
+func _on_health_died() -> void:
+	combat_state = CombatState.DEAD
+	grabbed_by = null
+	clear_navigation_target()
+	velocity *= 0.25
+	_update_debug_label()
+
+func _get_combat_state_name() -> String:
+	match combat_state:
+		CombatState.NORMAL:
+			return "NORMAL"
+		CombatState.GRABBED:
+			return "GRABBED"
+		CombatState.STUNNED:
+			return "STUNNED"
+		CombatState.DEAD:
+			return "DEAD"
+	return "UNKNOWN"
+
+func _get_grab_type_name() -> String:
+	match grab_type:
+		GrabType.NORMAL:
+			return "NORMAL"
+		GrabType.CEILING_STRANGLE:
+			return "CEILING_STRANGLE"
+		GrabType.REAR_DRAG:
+			return "REAR_DRAG"
+	return "UNKNOWN"
+
 func _draw() -> void:
 	super()
 	var body_color = Color("#d7d6c9")
@@ -445,3 +679,13 @@ func _draw() -> void:
 		var gun_direction = to_local(get_eye_position() + aim_direction.normalized() * 52.0) - to_local(get_eye_position())
 		draw_line(gun_origin, gun_origin + gun_direction.limit_length(34.0), Color("#202126"), 4.0)
 		draw_circle(gun_origin + gun_direction.limit_length(34.0), 2.5, alert_color)
+	_draw_health_bar()
+
+func _draw_health_bar() -> void:
+	if not _health_component:
+		return
+	var bar_size = Vector2(46, 6)
+	var bar_position = Vector2(-bar_size.x * 0.5, -82.0)
+	var ratio = clamp(get_current_health() / max(get_max_health(), 1.0), 0.0, 1.0)
+	draw_rect(Rect2(bar_position, bar_size), Color(0.05, 0.05, 0.05, 0.8))
+	draw_rect(Rect2(bar_position + Vector2.ONE, Vector2((bar_size.x - 2.0) * ratio, bar_size.y - 2.0)), Color("#ff5a4f"))

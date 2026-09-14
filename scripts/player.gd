@@ -45,9 +45,10 @@ enum PlayerState {
 @export var surface_hold_probe_extra_distance = 18.0
 @export var surface_hold_probe_spread = 0.82
 @export var ground_corner_capture_distance = 22.0
-@export var airborne_ceiling_grab_extra_distance = 8.0
 @export var wall_capture_distance = 22.0
 @export var ceiling_capture_distance = 30.0
+@export var ceiling_grab_distance = 16.0
+@export var ceiling_snap_distance = 18.0
 @export var surface_capture_rearm_delay = 0.12
 @export var surface_capture_commit_time = 0.12
 @export var surface_attach_offset = 1.5
@@ -163,6 +164,12 @@ var tail_anchor = Vector2.ZERO
 var tail_length = 30.0
 var tail_catch_visual_point = Vector2.ZERO
 var tail_catch_visual_timer = 0.0
+var debug_ceiling_probe_hit = false
+var debug_ceiling_grab_candidate = false
+var debug_ceiling_distance = -1.0
+var debug_ceiling_normal = Vector2.ZERO
+var debug_direct_ceiling_attach = false
+var debug_auto_tail_assist_attempted = false
 var sprint_noise_timer = 0.0
 var was_on_floor_last_frame = false
 
@@ -353,7 +360,7 @@ func _update_surface_crawl(delta: float) -> void:
 			return
 		if _try_outer_surface_corner_transition(previous_state):
 			return
-		if surface_loss_grace_timer > 0.0:
+		if state != PlayerState.CEILING and surface_loss_grace_timer > 0.0:
 			velocity = _get_surface_attach_velocity(attached_surface_normal)
 			return
 		if previous_state == PlayerState.CEILING:
@@ -731,6 +738,8 @@ func _try_surface_capture_assist(delta: float) -> bool:
 	if velocity.length() < 45.0:
 		return false
 
+	debug_direct_ceiling_attach = false
+	debug_auto_tail_assist_attempted = false
 	var capture_hit = _get_capture_contact_from_slides()
 	if ceiling_grab_exception and not capture_hit.is_empty() and _state_from_normal(capture_hit["normal"]) != PlayerState.CEILING:
 		capture_hit = {}
@@ -746,6 +755,9 @@ func _try_surface_capture_assist(delta: float) -> bool:
 	if ceiling_grab_exception and target_state != PlayerState.CEILING:
 		return false
 
+	if target_state == PlayerState.CEILING:
+		return _try_direct_ceiling_attach(capture_hit)
+
 	if target_state != PlayerState.CEILING:
 		_show_tail_catch_visual(capture_hit["position"])
 	HumanNoiseEvents.emit_noise(self, capture_hit["position"], grapple_pull_noise_loudness, grapple_pull_noise_radius, &"surface_attach")
@@ -757,6 +769,59 @@ func _try_surface_capture_assist(delta: float) -> bool:
 	_clear_tongue_grapple_for_surface_attach()
 	_clear_tongue_grapple_pull_for_surface_attach()
 	return true
+
+func _try_direct_ceiling_attach(initial_hit: Dictionary) -> bool:
+	var ceiling_hit = _get_valid_ceiling_grab_hit(initial_hit)
+	if ceiling_hit.is_empty():
+		debug_direct_ceiling_attach = false
+		return false
+
+	var original_position = global_position
+	if not _align_to_captured_surface_with_limit(ceiling_hit, ceiling_snap_distance):
+		debug_direct_ceiling_attach = false
+		return false
+	var confirmed_hit = _find_ceiling_hold_hit(ceiling_snap_distance)
+	if confirmed_hit.is_empty():
+		global_position = original_position
+		debug_direct_ceiling_attach = false
+		return false
+
+	attached_surface_normal = Vector2.DOWN
+	attached_contact_point = confirmed_hit["position"]
+	if not _align_to_captured_surface_with_limit(confirmed_hit, ceiling_snap_distance):
+		global_position = original_position
+		debug_direct_ceiling_attach = false
+		return false
+	set_movement_state(PlayerState.CEILING, confirmed_hit["normal"], confirmed_hit["position"])
+	velocity = _get_surface_attach_velocity(Vector2.DOWN)
+	_remove_ceiling_outward_velocity()
+	capture_commit_timer = 0.0
+	capture_rearm_timer = surface_capture_rearm_delay
+	ceiling_contact_grace_timer = min(ceiling_contact_grace_time, 0.035)
+	surface_loss_grace_timer = min(surface_loss_grace_time, 0.035)
+	debug_direct_ceiling_attach = true
+	HumanNoiseEvents.emit_noise(self, confirmed_hit["position"], grapple_pull_noise_loudness, grapple_pull_noise_radius, &"surface_attach")
+	_clear_tongue_grapple_for_surface_attach()
+	_clear_tongue_grapple_pull_for_surface_attach()
+	return true
+
+func _get_valid_ceiling_grab_hit(initial_hit: Dictionary) -> Dictionary:
+	debug_ceiling_grab_candidate = false
+	var contact_is_not_moving_away = not initial_hit.is_empty() and velocity.dot(initial_hit["normal"]) < 10.0
+	if not initial_hit.is_empty() and _is_ceiling_hit(initial_hit) and (_is_moving_toward_surface(initial_hit["normal"]) or contact_is_not_moving_away):
+		if _get_distance_from_surface(initial_hit, Vector2.DOWN) <= BODY_HALF_HEIGHT + ceiling_snap_distance:
+			_update_ceiling_debug(initial_hit)
+			debug_ceiling_grab_candidate = true
+			return initial_hit
+
+	var probe_hit = _find_ceiling_grab_hit()
+	if probe_hit.is_empty():
+		return {}
+	if not _is_moving_toward_surface(probe_hit["normal"]):
+		return {}
+	_update_ceiling_debug(probe_hit)
+	debug_ceiling_grab_candidate = true
+	return probe_hit
 
 func _get_capture_contact_from_slides() -> Dictionary:
 	for index in range(get_slide_collision_count()):
@@ -773,8 +838,8 @@ func _get_capture_contact_from_slides() -> Dictionary:
 
 func _find_surface_capture_hit() -> Dictionary:
 	var candidates = []
-	if velocity.y < -35.0:
-		var ceiling_hit = _find_ceiling_in_reach(ceiling_capture_distance + airborne_ceiling_grab_extra_distance)
+	if velocity.y < -airborne_ceiling_grab_min_up_speed:
+		var ceiling_hit = _find_ceiling_grab_hit()
 		if _is_ceiling_hit(ceiling_hit) and _is_moving_toward_surface(ceiling_hit["normal"]):
 			candidates.append(ceiling_hit)
 
@@ -817,6 +882,19 @@ func _align_to_captured_surface(hit: Dictionary) -> void:
 	var max_snap = max(wall_capture_distance, ceiling_capture_distance) + surface_attach_offset + 2.0
 	if abs(offset.dot(normal)) <= max_snap:
 		global_position += offset
+
+func _align_to_captured_surface_with_limit(hit: Dictionary, snap_distance: float) -> bool:
+	var normal = _cardinalize_surface_normal(hit["normal"])
+	var desired_position = _get_aligned_position_for_surface(hit)
+	var offset = normal * (desired_position - global_position).dot(normal)
+	if abs(offset.dot(normal)) > snap_distance + surface_attach_offset + 1.0:
+		return false
+	global_position += offset
+	return true
+
+func _get_distance_from_surface(hit: Dictionary, surface_normal: Vector2) -> float:
+	var normal = _cardinalize_surface_normal(surface_normal)
+	return max((global_position - hit["position"]).dot(normal), 0.0)
 
 func _get_aligned_position_for_surface(hit: Dictionary) -> Vector2:
 	var normal = _cardinalize_surface_normal(hit["normal"])
@@ -876,6 +954,7 @@ func _find_attached_surface_hold_hit() -> Dictionary:
 func _hold_ceiling_contact(delta: float) -> bool:
 	var hit = _find_ceiling_hold_hit()
 	if not hit.is_empty():
+		_update_ceiling_debug(hit)
 		attached_surface_normal = _cardinalize_surface_normal(hit["normal"])
 		attached_contact_point = hit["position"]
 		ceiling_contact_grace_timer = ceiling_contact_grace_time
@@ -884,17 +963,23 @@ func _hold_ceiling_contact(delta: float) -> bool:
 		surface_loss_grace_timer = surface_loss_grace_time
 		return true
 
+	debug_ceiling_probe_hit = false
+	debug_ceiling_grab_candidate = false
+	debug_ceiling_distance = -1.0
+	debug_ceiling_normal = Vector2.ZERO
 	ceiling_contact_grace_timer = max(ceiling_contact_grace_timer - delta, 0.0)
 	if ceiling_contact_grace_timer > 0.0:
 		_remove_ceiling_outward_velocity()
-		return true
+		velocity.x = 0.0
+		return false
 	return false
 
-func _find_ceiling_hold_hit() -> Dictionary:
+func _find_ceiling_hold_hit(extra_distance: float = -1.0) -> Dictionary:
 	var normal = attached_surface_normal
 	if normal == Vector2.ZERO:
 		normal = Vector2.DOWN
-	return _find_surface_hold_hit(normal, ceiling_hold_check_distance)
+	var hold_distance = ceiling_hold_check_distance if extra_distance < 0.0 else extra_distance
+	return _find_surface_hold_hit(normal, hold_distance)
 
 func _find_surface_hold_hit(normal: Vector2, extra_distance: float = -1.0) -> Dictionary:
 	var cardinal_normal = _cardinalize_surface_normal(normal)
@@ -991,6 +1076,17 @@ func _clear_tongue_grapple_pull_for_surface_attach() -> void:
 	if tongue and tongue.has_method("clear_grapple_pull_without_player_release"):
 		tongue.clear_grapple_pull_without_player_release()
 
+func _find_ceiling_grab_hit() -> Dictionary:
+	var hit = _find_ceiling_in_reach(ceiling_grab_distance)
+	debug_ceiling_probe_hit = not hit.is_empty()
+	debug_ceiling_grab_candidate = debug_ceiling_probe_hit and _is_moving_toward_surface(hit["normal"])
+	if debug_ceiling_probe_hit:
+		_update_ceiling_debug(hit)
+	else:
+		debug_ceiling_distance = -1.0
+		debug_ceiling_normal = Vector2.ZERO
+	return hit
+
 func _find_ceiling_in_reach(distance: float) -> Dictionary:
 	var probes = [
 		global_position + Vector2(0.0, -BODY_HALF_HEIGHT),
@@ -1002,8 +1098,18 @@ func _find_ceiling_in_reach(distance: float) -> Dictionary:
 	for probe_origin in probes:
 		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.UP * distance)
 		if _is_ceiling_hit(hit):
+			_update_ceiling_debug(hit)
 			return hit
 	return {}
+
+func _update_ceiling_debug(hit: Dictionary) -> void:
+	debug_ceiling_probe_hit = not hit.is_empty()
+	if hit.is_empty():
+		debug_ceiling_distance = -1.0
+		debug_ceiling_normal = Vector2.ZERO
+		return
+	debug_ceiling_distance = _get_distance_from_surface(hit, Vector2.DOWN) - BODY_HALF_HEIGHT
+	debug_ceiling_normal = _cardinalize_surface_normal(hit["normal"])
 
 func _find_wall_in_direction(direction: float, distance: float) -> Dictionary:
 	if is_zero_approx(direction):
@@ -1059,6 +1165,9 @@ func _try_attach_from_contacts() -> void:
 	if contact.is_empty():
 		return
 
+	if _state_from_normal(contact["normal"]) == PlayerState.CEILING:
+		_try_direct_ceiling_attach(contact)
+		return
 	set_movement_state(_state_from_normal(contact["normal"]), contact["normal"], contact["position"])
 
 func _get_attachable_contact() -> Dictionary:
@@ -1405,11 +1514,20 @@ func _get_state_name() -> String:
 		]
 	if last_corner_expected_normal != Vector2.ZERO:
 		normal_text += "\nEXPECT %s" % _format_vector2(last_corner_expected_normal)
+	if state == PlayerState.AIRBORNE or state == PlayerState.CEILING:
+		normal_text += "\nCEIL hit:%s cand:%s d:%.1f n:%s direct:%s tail_auto:%s" % [
+			str(debug_ceiling_probe_hit),
+			str(debug_ceiling_grab_candidate),
+			debug_ceiling_distance,
+			_format_vector2(debug_ceiling_normal),
+			str(debug_direct_ceiling_attach),
+			str(debug_auto_tail_assist_attempted),
+		]
 	match state:
 		PlayerState.GROUNDED:
 			return "GROUNDED" + suffix + normal_text
 		PlayerState.AIRBORNE:
-			return "AIRBORNE"
+			return "AIRBORNE" + normal_text
 		PlayerState.WALL_LEFT:
 			return "WALL_LEFT" + suffix + normal_text
 		PlayerState.WALL_RIGHT:
@@ -1487,6 +1605,9 @@ func get_tongue_origin_global() -> Vector2:
 	if frog_visual:
 		return frog_visual.to_global(tongue_origin)
 	return to_global(Vector2(tongue_origin.x * facing_direction, tongue_origin.y))
+
+func is_ceiling_attached() -> bool:
+	return state == PlayerState.CEILING
 
 func get_runner_x() -> float:
 	return global_position.x

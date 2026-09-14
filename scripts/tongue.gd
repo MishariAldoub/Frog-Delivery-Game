@@ -14,9 +14,14 @@ const HumanNoiseEvents = preload("res://scripts/ai/human_noise.gd")
 @export var grapple_impact_noise_radius = 520.0
 @export var grapple_impact_noise_loudness = 1.0
 
+const ENEMY_GRAB_NORMAL = 0
+const ENEMY_GRAB_CEILING_STRANGLE = 1
+const ENEMY_GRAB_REAR_DRAG = 2
+
 var player
 var pizzas: Array[RigidBody2D] = []
 var latched_pizza: RigidBody2D
+var latched_enemy: Node2D
 var local_grab_point = Vector2.ZERO
 var aim_point = Vector2.ZERO
 var grapple_anchor = Vector2.ZERO
@@ -24,6 +29,8 @@ var is_grappled_to_surface = false
 var grapple_pull_anchor = Vector2.ZERO
 var is_grapple_pulling_to_surface = false
 var suppressed_until_release = false
+var enemy_grab_type = ENEMY_GRAB_NORMAL
+var enemy_rope_length = 0.0
 
 func set_pizza_source(source: Array[RigidBody2D]) -> void:
 	pizzas = source
@@ -41,6 +48,8 @@ func _physics_process(_delta: float) -> void:
 	if Input.is_action_just_pressed("grapple_tongue"):
 		_try_grapple_pull()
 
+	if Input.is_action_pressed("shoot_tongue") and is_instance_valid(latched_enemy):
+		_update_enemy_grab(_delta)
 	if Input.is_action_pressed("shoot_tongue") and is_instance_valid(latched_pizza):
 		_pull_toward_mouse_target()
 
@@ -54,6 +63,19 @@ func _try_latch() -> void:
 	HumanNoiseEvents.emit_noise(player, origin, tongue_shot_noise_loudness, tongue_shot_noise_radius, &"tongue_shot")
 	var cursor = get_global_mouse_position()
 	var clamped_target = origin + (cursor - origin).limit_length(max_range)
+
+	var enemy_hit = _get_enemy_tongue_hit(origin, clamped_target)
+	if not enemy_hit.is_empty():
+		var enemy = enemy_hit["target"] as Node2D
+		var grab_kind = _get_enemy_grab_type(enemy, origin, clamped_target)
+		enemy_rope_length = clamp(origin.distance_to(enemy_hit["point"]), 16.0, max_range)
+		var grab_target = _get_enemy_rope_target(origin, enemy_hit["point"], grab_kind)
+		if enemy and enemy.has_method("begin_tongue_grab") and enemy.begin_tongue_grab(player, grab_kind, grab_target):
+			latched_enemy = enemy
+			enemy_grab_type = grab_kind
+			HumanNoiseEvents.emit_noise(player, enemy.global_position, grapple_impact_noise_loudness, grapple_impact_noise_radius, &"tongue_enemy_grab")
+			return
+		enemy_rope_length = 0.0
 
 	var surface_hit = _get_grapple_surface_hit(origin, clamped_target)
 	if not surface_hit.is_empty():
@@ -130,8 +152,26 @@ func _pull_toward_mouse_target() -> void:
 		max_grabbed_angular_velocity
 	)
 
+func _update_enemy_grab(delta: float) -> void:
+	if not is_instance_valid(latched_enemy):
+		latched_enemy = null
+		return
+	var origin = player.get_tongue_origin_global()
+	var target = _get_enemy_rope_target(origin, get_global_mouse_position(), enemy_grab_type)
+	if latched_enemy.has_method("update_tongue_grab"):
+		latched_enemy.update_tongue_grab(target, delta)
+
 func _get_mouse_target(origin: Vector2) -> Vector2:
 	return origin + (get_global_mouse_position() - origin).limit_length(max_range)
+
+func _get_enemy_rope_target(origin: Vector2, desired_world_point: Vector2, grab_kind: int) -> Vector2:
+	if grab_kind == ENEMY_GRAB_CEILING_STRANGLE:
+		var hang_length = max(enemy_rope_length, 54.0)
+		return origin + Vector2.DOWN * min(hang_length, max_range)
+	var direction = desired_world_point - origin
+	if direction.length_squared() <= 1.0:
+		direction = Vector2.RIGHT
+	return origin + direction.limit_length(min(max(enemy_rope_length, 20.0), max_range))
 
 func _get_clamped_local_grab_point(pizza: RigidBody2D, world_point: Vector2, tongue_origin: Vector2) -> Vector2:
 	var local_point = pizza.to_local(world_point)
@@ -152,6 +192,11 @@ func _get_clamped_local_grab_point(pizza: RigidBody2D, world_point: Vector2, ton
 	return local_point
 
 func _release() -> void:
+	if is_instance_valid(latched_enemy) and latched_enemy.has_method("release_tongue_grab"):
+		latched_enemy.release_tongue_grab()
+	latched_enemy = null
+	enemy_grab_type = ENEMY_GRAB_NORMAL
+	enemy_rope_length = 0.0
 	latched_pizza = null
 	local_grab_point = Vector2.ZERO
 	grapple_anchor = Vector2.ZERO
@@ -165,6 +210,11 @@ func release_if_grabbing(pizza: RigidBody2D) -> void:
 		_release()
 
 func clear_grapple_without_player_release() -> void:
+	if is_instance_valid(latched_enemy) and latched_enemy.has_method("release_tongue_grab"):
+		latched_enemy.release_tongue_grab()
+	latched_enemy = null
+	enemy_grab_type = ENEMY_GRAB_NORMAL
+	enemy_rope_length = 0.0
 	latched_pizza = null
 	local_grab_point = Vector2.ZERO
 	grapple_anchor = Vector2.ZERO
@@ -189,6 +239,16 @@ func _draw() -> void:
 	elif is_grappled_to_surface:
 		draw_line(origin, to_local(grapple_anchor), Color("#ff397c"), 7.0)
 		draw_circle(to_local(grapple_anchor), 8.0, Color("#ff397c"))
+		return
+	elif is_instance_valid(latched_enemy):
+		var global_origin = player.get_tongue_origin_global()
+		var rope_target = _get_enemy_rope_target(global_origin, get_global_mouse_position(), enemy_grab_type)
+		var grab_point = latched_enemy.get_tongue_target_position() if latched_enemy.has_method("get_tongue_target_position") else latched_enemy.global_position
+		var target_color = Color("#a8f0ff") if enemy_grab_type == ENEMY_GRAB_CEILING_STRANGLE else Color("#ff397c")
+		draw_line(origin, to_local(rope_target), Color("#ff8fbd"), 4.0)
+		draw_line(to_local(rope_target), to_local(grab_point), target_color, 6.0)
+		draw_circle(to_local(rope_target), 6.0, Color("#ff8fbd"))
+		draw_circle(to_local(grab_point), 8.0, target_color)
 		return
 	elif is_instance_valid(latched_pizza):
 		var global_origin = player.get_tongue_origin_global()
@@ -224,6 +284,53 @@ func _get_grapple_surface_hit(origin: Vector2, target: Vector2) -> Dictionary:
 		return {}
 
 	return hit
+
+func _get_enemy_tongue_hit(origin: Vector2, target: Vector2) -> Dictionary:
+	var best_hit = {}
+	var best_along_distance = INF
+	for candidate in get_tree().get_nodes_in_group("tongue_combat_target"):
+		if not (candidate is Node2D):
+			continue
+		if candidate == player or not candidate.has_method("get_tongue_target_position") or not candidate.has_method("begin_tongue_grab"):
+			continue
+		var target_position = candidate.get_tongue_target_position()
+		var along_tongue = Geometry2D.get_closest_point_to_segment(target_position, origin, target)
+		var distance = target_position.distance_to(along_tongue)
+		if distance > latch_radius:
+			continue
+		var along_distance = origin.distance_to(along_tongue)
+		if along_distance >= best_along_distance:
+			continue
+		if not _has_clear_tongue_path(origin, along_tongue):
+			continue
+		best_along_distance = along_distance
+		best_hit = {
+			"target": candidate,
+			"point": along_tongue,
+			"distance": distance,
+		}
+	return best_hit
+
+func _has_clear_tongue_path(origin: Vector2, grab_point: Vector2) -> bool:
+	var surface_hit = _get_grapple_surface_hit(origin, grab_point)
+	if surface_hit.is_empty():
+		return true
+	return origin.distance_to(surface_hit["position"]) >= origin.distance_to(grab_point) - 8.0
+
+func _get_enemy_grab_type(enemy: Node2D, origin: Vector2, target: Vector2) -> int:
+	if _is_ceiling_strangle_attempt(origin, target):
+		return ENEMY_GRAB_CEILING_STRANGLE
+	if enemy.has_method("is_attack_from_behind") and enemy.is_attack_from_behind(origin):
+		return ENEMY_GRAB_REAR_DRAG
+	return ENEMY_GRAB_NORMAL
+
+func _is_ceiling_strangle_attempt(origin: Vector2, target: Vector2) -> bool:
+	if not player or not player.has_method("is_ceiling_attached") or not player.is_ceiling_attached():
+		return false
+	var shot_direction = target - origin
+	if shot_direction.length_squared() <= 1.0:
+		return false
+	return shot_direction.normalized().dot(Vector2.DOWN) > 0.55
 
 func _get_grapple_pull_range() -> float:
 	if player:
