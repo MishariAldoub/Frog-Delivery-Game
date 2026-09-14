@@ -4,3 +4,4 @@
 
 [node name="Tongue" type="Node2D" unique_id=1781092456]
 script = ExtResource("1")
+max_range = 230.0

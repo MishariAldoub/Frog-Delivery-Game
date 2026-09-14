@@ -1,200 +1,146 @@
-[gd_scene format=3 uid="uid://ddppiiiqnpkf8"]
+[gd_scene format=4 uid="uid://ddppiiiqnpkf8"]
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_ground_left"]
-size = Vector2(880, 48)
+[ext_resource type="Script" uid="uid://7wc34imtqlxp" path="res://scripts/room_area.gd" id="1_room_area"]
+[ext_resource type="PackedScene" path="res://scenes/Scientist.tscn" id="2_scientist"]
+[ext_resource type="Script" uid="uid://bm5t631bne7o5" path="res://scripts/ai/human_interest_point.gd" id="3_interest_point"]
+[ext_resource type="PackedScene" uid="uid://ccw16bmhsqi8p" path="res://scenes/Player.tscn" id="4_player"]
+[ext_resource type="TileSet" uid="uid://bc4e6vmg5b8hd" path="res://assets/tilesets/prototype_debug_tileset.tres" id="5_proto_tileset"]
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_ground_right"]
-size = Vector2(360, 48)
+[sub_resource type="NavigationPolygon" id="NavigationPolygon_ground_left"]
+vertices = PackedVector2Array(-320, 532, 520, 532, 520, 548, -320, 548)
+polygons = Array[PackedInt32Array]([PackedInt32Array(0, 1, 2, 3)])
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_side_wall"]
-size = Vector2(48, 640)
+[sub_resource type="NavigationPolygon" id="NavigationPolygon_ground_right"]
+vertices = PackedVector2Array(784, 532, 1268, 532, 1268, 548, 784, 548)
+polygons = Array[PackedInt32Array]([PackedInt32Array(0, 1, 2, 3)])
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_platform_small"]
-size = Vector2(220, 28)
+[sub_resource type="NavigationPolygon" id="NavigationPolygon_mid_platform"]
+vertices = PackedVector2Array(660, 366, 900, 366, 900, 382, 660, 382)
+polygons = Array[PackedInt32Array]([PackedInt32Array(0, 1, 2, 3)])
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_platform_medium"]
-size = Vector2(260, 28)
+[sub_resource type="NavigationPolygon" id="NavigationPolygon_high_platform"]
+vertices = PackedVector2Array(890, 231, 1070, 231, 1070, 247, 890, 247)
+polygons = Array[PackedInt32Array]([PackedInt32Array(0, 1, 2, 3)])
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_platform_high"]
-size = Vector2(200, 28)
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_room_a"]
+size = Vector2(1589, 442)
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_low_ceiling"]
-size = Vector2(300, 32)
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_room_b"]
+size = Vector2(617, 310)
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_long_ceiling"]
-size = Vector2(560, 32)
-
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_shaft_wall"]
-size = Vector2(36, 360)
-
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_gap_anchor"]
-size = Vector2(240, 28)
-
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_far_wall"]
-size = Vector2(44, 460)
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_room_c"]
+size = Vector2(1230, 740)
 
 [node name="LevelTest" type="Node2D" unique_id=2959916]
 
-[node name="Background" type="Polygon2D" parent="." unique_id=1356593927]
-color = Color(0.12, 0.17, 0.18, 1)
-polygon = PackedVector2Array(-480, -160, 1500, -160, 1500, 650, -480, 650)
+[node name="TileMaps" type="Node2D" parent="." unique_id=860069690]
 
-[node name="GroundLeft" type="StaticBody2D" parent="." unique_id=357368711 groups=["grapple_surface"]]
-position = Vector2(100, 560)
+[node name="PrototypeTerrainTileMap" type="TileMapLayer" parent="TileMaps" unique_id=1712853061 groups=["grapple_surface"]]
+tile_map_data = PackedByteArray("AAD6/xEAAAABAAAAAAD5/xEAAAABAAAAAAD4/xEAAAABAAAAAAD3/xEAAAABAAAAAAD2/w8AAAADAAAAAAD2/w4AAAADAAAAAAD2/w0AAAADAAAAAAD2/wwAAAADAAAAAAD2/wsAAAADAAAAAAD2/xEAAAABAAMAAAD7/xEAAAABAAAAAAD8/xEAAAABAAAAAAD9/xEAAAABAAAAAAD+/xEAAAABAAAAAAD//xEAAAABAAAAAAAAABEAAAABAAAAAAABABEAAAABAAAAAAACABEAAAABAAAAAAADABEAAAABAAAAAAAEABEAAAABAAAAAAD2/xAAAAADAAAAAAAFABEAAAABAAAAAAAGABEAAAABAAAAAAAHABEAAAABAAAAAAAJABEAAAABAAAAAAAKABEAAAABAAAAAAALABEAAAABAAAAAAAMABEAAAABAAAAAAANABEAAAABAAAAAAAOABEAAAABAAAAAAAPABEAAAABAAAAAAAQABEAAAABAAAAAAARABEAAAABAAAAAAASABEAAAABAAAAAAATABEAAAABAAAAAAAUABEAAAABAAAAAAAVABEAAAABAAAAAAAKAAkAAAADAAAAAAAKAAgAAAADAAAAAAAKAAcAAAADAAAAAAD3/woAAAACAAAAAAD4/woAAAACAAAAAAD5/woAAAACAAAAAAD6/woAAAACAAAAAAD7/woAAAACAAAAAAD8/woAAAACAAAAAAD9/woAAAACAAAAAAD+/woAAAACAAAAAAD//woAAAACAAAAAAAAAAoAAAACAAAAAAABAAoAAAACAAAAAAACAAoAAAACAAAAAAADAAoAAAACAAAAAAAEAAoAAAACAAAAAAAFAAoAAAACAAAAAAAGAAoAAAACAAAAAAAHAAoAAAACAAAAAAAIAAoAAAACAAAAAAAJAAoAAAACAAAAAAD2/woAAAADAAMAAAAIABEAAAABAAAAAAAKAAYAAAADAAAAAAALAAUAAAACAAAAAAAMAAUAAAACAAAAAAANAAUAAAACAAAAAAAOAAUAAAACAAAAAAAPAAUAAAACAAAAAAAQAAUAAAACAAAAAAARAAUAAAACAAAAAAASAAUAAAACAAAAAAATAAUAAAACAAAAAAAUAAUAAAACAAAAAAAVAAUAAAACAAAAAAAWAAUAAAACAAAAAAAXAAUAAAACAAAAAAAYAAUAAAACAAAAAAAZAAUAAAACAAAAAAAaAAUAAAACAAMAAAAKAAoAAAAAAAMAAAAKAAUAAAADAAMAAAAPAA4AAAAAAAEAAAAPAA0AAAAAAAEAAAAPAAwAAAAAAAEAAAAPAAsAAAAAAAEAAAAPAAoAAAAAAAEAAAAPAAkAAAADAAMAAAAQAAkAAAADAAEAAAARAAkAAAADAAEAAAASAAkAAAADAAEAAAATAAkAAAADAAEAAAAUAAkAAAADAAEAAAAVAAkAAAADAAEAAAA=")
+tile_set = ExtResource("5_proto_tileset")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="GroundLeft" unique_id=118484131]
-shape = SubResource("RectangleShape2D_ground_left")
+[node name="Player" parent="." unique_id=251644830 instance=ExtResource("4_player")]
+position = Vector2(-180, 500)
+grapple_release_lift = 20.0
 
-[node name="Visual" type="Polygon2D" parent="GroundLeft" unique_id=702618762]
-color = Color(0.25, 0.44, 0.35, 1)
-polygon = PackedVector2Array(-440, -24, 440, -24, 440, 24, -440, 24)
+[node name="Navigation" type="Node2D" parent="." unique_id=690352857]
+visible = false
 
-[node name="GroundRight" type="StaticBody2D" parent="." unique_id=682556457 groups=["grapple_surface"]]
-position = Vector2(880, 560)
+[node name="NavigationGroundLeft" type="NavigationRegion2D" parent="Navigation" unique_id=1975013725]
+navigation_polygon = SubResource("NavigationPolygon_ground_left")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="GroundRight" unique_id=101142586]
-shape = SubResource("RectangleShape2D_ground_right")
+[node name="NavigationGroundRight" type="NavigationRegion2D" parent="Navigation" unique_id=1834673430]
+navigation_polygon = SubResource("NavigationPolygon_ground_right")
 
-[node name="Visual" type="Polygon2D" parent="GroundRight" unique_id=15157734]
-color = Color(0.25, 0.44, 0.35, 1)
-polygon = PackedVector2Array(-180, -24, 180, -24, 180, 24, -180, 24)
+[node name="NavigationMidPlatform" type="NavigationRegion2D" parent="Navigation" unique_id=903287648]
+navigation_polygon = SubResource("NavigationPolygon_mid_platform")
 
-[node name="LeftWall" type="StaticBody2D" parent="." unique_id=1412881500 groups=["grapple_surface"]]
-position = Vector2(-360, 240)
+[node name="NavigationHighPlatform" type="NavigationRegion2D" parent="Navigation" unique_id=1416332307]
+navigation_polygon = SubResource("NavigationPolygon_high_platform")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="LeftWall" unique_id=1120374556]
-shape = SubResource("RectangleShape2D_side_wall")
+[node name="RoomAreas" type="Node2D" parent="." unique_id=191546882]
 
-[node name="Visual" type="Polygon2D" parent="LeftWall" unique_id=1860688990]
-color = Color(0.21, 0.37, 0.4, 1)
-polygon = PackedVector2Array(-24, -320, 24, -320, 24, 320, -24, 320)
+[node name="RoomA" type="Area2D" parent="RoomAreas" unique_id=1297513790 groups=["room_area"]]
+position = Vector2(-21, 442)
+script = ExtResource("1_room_area")
+room_name = "ROOM A"
 
-[node name="RightWall" type="StaticBody2D" parent="." unique_id=296923778 groups=["grapple_surface"]]
-position = Vector2(1100, 240)
+[node name="CollisionShape2D" type="CollisionShape2D" parent="RoomAreas/RoomA" unique_id=815380395]
+position = Vector2(495.5, -85)
+shape = SubResource("RectangleShape2D_room_a")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="RightWall" unique_id=1016599140]
-shape = SubResource("RectangleShape2D_side_wall")
+[node name="RoomB" type="Area2D" parent="RoomAreas" unique_id=2126029572 groups=["room_area"]]
+position = Vector2(784, 370)
+script = ExtResource("1_room_area")
+room_name = "ROOM B"
 
-[node name="Visual" type="Polygon2D" parent="RightWall" unique_id=1251075718]
-color = Color(0.21, 0.37, 0.4, 1)
-polygon = PackedVector2Array(-24, -320, 24, -320, 24, 320, -24, 320)
+[node name="CollisionShape2D" type="CollisionShape2D" parent="RoomAreas/RoomB" unique_id=1820002007]
+position = Vector2(577, -646)
+shape = SubResource("RectangleShape2D_room_b")
 
-[node name="LowPlatform" type="StaticBody2D" parent="." unique_id=1532232448 groups=["grapple_surface"]]
-position = Vector2(140, 430)
+[node name="RoomC" type="Area2D" parent="RoomAreas" unique_id=714022750 groups=["room_area"]]
+position = Vector2(620, -250)
+script = ExtResource("1_room_area")
+room_name = "ROOM C"
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="LowPlatform" unique_id=578253470]
-shape = SubResource("RectangleShape2D_platform_small")
+[node name="CollisionShape2D" type="CollisionShape2D" parent="RoomAreas/RoomC" unique_id=692729284]
+position = Vector2(-335, 0)
+shape = SubResource("RectangleShape2D_room_c")
 
-[node name="Visual" type="Polygon2D" parent="LowPlatform" unique_id=569575425]
-color = Color(0.4, 0.55, 0.33, 1)
-polygon = PackedVector2Array(-110, -14, 110, -14, 110, 14, -110, 14)
+[node name="RoomA2" type="Area2D" parent="RoomAreas" unique_id=553017282 groups=["room_area"]]
+visible = false
+position = Vector2(1390, 381)
+script = ExtResource("1_room_area")
+room_name = "ROOM A"
 
-[node name="MidPlatform" type="StaticBody2D" parent="." unique_id=195791055 groups=["grapple_surface"]]
-position = Vector2(780, 380)
+[node name="CollisionShape2D" type="CollisionShape2D" parent="RoomAreas/RoomA2" unique_id=1301217723]
+position = Vector2(0, -216.5)
+shape = SubResource("RectangleShape2D_room_a")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="MidPlatform" unique_id=1892532802]
-shape = SubResource("RectangleShape2D_platform_medium")
+[node name="ScientistSetup" type="Node2D" parent="." unique_id=243179654]
+visible = false
 
-[node name="Visual" type="Polygon2D" parent="MidPlatform" unique_id=114378178]
-color = Color(0.4, 0.55, 0.33, 1)
-polygon = PackedVector2Array(-130, -14, 130, -14, 130, 14, -130, 14)
+[node name="ScientistWorkA" type="Marker2D" parent="ScientistSetup" unique_id=1714073935 groups=["human_interest_point", "scientist_work_point"]]
+position = Vector2(-40, 532)
+script = ExtResource("3_interest_point")
+point_type = 0
+facing_direction = -1
+work_duration_min = 5.0
+work_duration_max = 9.0
 
-[node name="HighPlatform" type="StaticBody2D" parent="." unique_id=987473377 groups=["grapple_surface"]]
-position = Vector2(980, 245)
+[node name="ScientistWorkB" type="Marker2D" parent="ScientistSetup" unique_id=859899289 groups=["human_interest_point", "scientist_work_point"]]
+position = Vector2(260, 532)
+script = ExtResource("3_interest_point")
+point_type = 0
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="HighPlatform" unique_id=1331372386]
-shape = SubResource("RectangleShape2D_platform_high")
+[node name="ScientistWanderA" type="Marker2D" parent="ScientistSetup" unique_id=2096855971 groups=["human_interest_point", "scientist_wander_point"]]
+position = Vector2(-260, 532)
+script = ExtResource("3_interest_point")
+facing_direction = -1
 
-[node name="Visual" type="Polygon2D" parent="HighPlatform" unique_id=284131746]
-color = Color(0.4, 0.55, 0.33, 1)
-polygon = PackedVector2Array(-100, -14, 100, -14, 100, 14, -100, 14)
+[node name="ScientistWanderB" type="Marker2D" parent="ScientistSetup" unique_id=1525216647 groups=["human_interest_point", "scientist_wander_point"]]
+position = Vector2(470, 532)
+script = ExtResource("3_interest_point")
 
-[node name="LowCeiling" type="StaticBody2D" parent="." unique_id=788722420 groups=["grapple_surface"]]
-position = Vector2(-122, 255)
+[node name="ScientistUnreachableWander" type="Marker2D" parent="ScientistSetup" unique_id=355176 groups=["human_interest_point", "scientist_wander_point"]]
+position = Vector2(850, 532)
+script = ExtResource("3_interest_point")
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="LowCeiling" unique_id=1972346665]
-shape = SubResource("RectangleShape2D_low_ceiling")
+[node name="ScientistPlatformWork" type="Marker2D" parent="ScientistSetup" unique_id=971388158 groups=["human_interest_point", "scientist_work_point"]]
+position = Vector2(700, 366)
+script = ExtResource("3_interest_point")
+point_type = 0
 
-[node name="Visual" type="Polygon2D" parent="LowCeiling" unique_id=947970810]
-color = Color(0.34, 0.47, 0.46, 1)
-polygon = PackedVector2Array(-150, -16, 150, -16, 150, 16, -150, 16)
+[node name="ScientistPlatformWander" type="Marker2D" parent="ScientistSetup" unique_id=1755008957 groups=["human_interest_point", "scientist_wander_point"]]
+position = Vector2(895, 366)
+script = ExtResource("3_interest_point")
+facing_direction = -1
 
-[node name="LowCeiling2" type="StaticBody2D" parent="." unique_id=1189676048 groups=["grapple_surface"]]
-position = Vector2(-74, 124)
+[node name="ScientistLedgeTest" parent="ScientistSetup" unique_id=1188915087 instance=ExtResource("2_scientist")]
+position = Vector2(895, 366)
 
-[node name="CollisionShape2D" type="CollisionShape2D" parent="LowCeiling2" unique_id=1997321056]
-shape = SubResource("RectangleShape2D_low_ceiling")
+[node name="ScientistA" parent="ScientistSetup" unique_id=1124640437 instance=ExtResource("2_scientist")]
+position = Vector2(37, 168)
 
-[node name="Visual" type="Polygon2D" parent="LowCeiling2" unique_id=948000559]
-color = Color(0.34, 0.47, 0.46, 1)
-polygon = PackedVector2Array(-150, -16, 150, -16, 150, 16, -150, 16)
-
-[node name="LowCeiling3" type="StaticBody2D" parent="." unique_id=129742657 groups=["grapple_surface"]]
-position = Vector2(-41, -123)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="LowCeiling3" unique_id=1437282698]
-shape = SubResource("RectangleShape2D_low_ceiling")
-
-[node name="Visual" type="Polygon2D" parent="LowCeiling3" unique_id=697420452]
-color = Color(0.34, 0.47, 0.46, 1)
-polygon = PackedVector2Array(-150, -16, 150, -16, 150, 16, -150, 16)
-
-[node name="LongUpperCeiling" type="StaticBody2D" parent="." unique_id=1734679660 groups=["grapple_surface"]]
-position = Vector2(656, -25)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="LongUpperCeiling" unique_id=1446269967]
-shape = SubResource("RectangleShape2D_long_ceiling")
-
-[node name="Visual" type="Polygon2D" parent="LongUpperCeiling" unique_id=1309036001]
-color = Color(0.34, 0.47, 0.46, 1)
-polygon = PackedVector2Array(-280, -16, 280, -16, 280, 16, -280, 16)
-
-[node name="ShaftLeftWall" type="StaticBody2D" parent="." unique_id=1063089280 groups=["grapple_surface"]]
-position = Vector2(358, 265)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="ShaftLeftWall" unique_id=1349803030]
-shape = SubResource("RectangleShape2D_shaft_wall")
-
-[node name="Visual" type="Polygon2D" parent="ShaftLeftWall" unique_id=308010070]
-color = Color(0.21, 0.37, 0.4, 1)
-polygon = PackedVector2Array(-18, -180, 18, -180, 18, 180, -18, 180)
-
-[node name="ShaftRightWall" type="StaticBody2D" parent="." unique_id=700279914 groups=["grapple_surface"]]
-position = Vector2(558, 265)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="ShaftRightWall" unique_id=1321637719]
-shape = SubResource("RectangleShape2D_shaft_wall")
-
-[node name="Visual" type="Polygon2D" parent="ShaftRightWall" unique_id=1793103921]
-color = Color(0.21, 0.37, 0.4, 1)
-polygon = PackedVector2Array(-18, -180, 18, -180, 18, 180, -18, 180)
-
-[node name="ShaftTopPlatform" type="StaticBody2D" parent="." unique_id=575375516 groups=["grapple_surface"]]
-position = Vector2(458, 80)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="ShaftTopPlatform" unique_id=1088489782]
-shape = SubResource("RectangleShape2D_platform_high")
-
-[node name="Visual" type="Polygon2D" parent="ShaftTopPlatform" unique_id=871806797]
-color = Color(0.4, 0.55, 0.33, 1)
-polygon = PackedVector2Array(-100, -14, 100, -14, 100, 14, -100, 14)
-
-[node name="GapGrappleAnchor" type="StaticBody2D" parent="." unique_id=2015394831 groups=["grapple_surface"]]
-position = Vector2(320, 235)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="GapGrappleAnchor" unique_id=206280960]
-shape = SubResource("RectangleShape2D_gap_anchor")
-
-[node name="Visual" type="Polygon2D" parent="GapGrappleAnchor" unique_id=1166991868]
-color = Color(0.34, 0.47, 0.46, 1)
-polygon = PackedVector2Array(-120, -14, 120, -14, 120, 14, -120, 14)
-
-[node name="FarGrappleWall" type="StaticBody2D" parent="." unique_id=1523444053 groups=["grapple_surface"]]
-position = Vector2(1360, 330)
-
-[node name="CollisionShape2D" type="CollisionShape2D" parent="FarGrappleWall" unique_id=1501928876]
-shape = SubResource("RectangleShape2D_far_wall")
-
-[node name="Visual" type="Polygon2D" parent="FarGrappleWall" unique_id=336710403]
-color = Color(0.21, 0.37, 0.4, 1)
-polygon = PackedVector2Array(-22, -230, 22, -230, 22, 230, -22, 230)
+[node name="ScientistB" parent="ScientistSetup" unique_id=454821859 instance=ExtResource("2_scientist")]
+position = Vector2(382, 490)

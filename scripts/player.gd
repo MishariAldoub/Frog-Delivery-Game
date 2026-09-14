@@ -1,7 +1,8 @@
 extends CharacterBody2D
 
-const FrogScene = preload("res://scenes/Frog.tscn")
+const PlayerVisualScene = preload("res://scenes/PlayerVisual.tscn")
 const TongueScene = preload("res://scenes/Tongue.tscn")
+const HumanNoiseEvents = preload("res://scripts/ai/human_noise.gd")
 
 enum PlayerState {
 	GROUNDED,
@@ -11,6 +12,7 @@ enum PlayerState {
 	CEILING,
 	TAIL_HANG,
 	GRAPPLING,
+	GRAPPLE_PULL,
 }
 
 @export_group("Movement")
@@ -40,6 +42,11 @@ enum PlayerState {
 @export var surface_adhesion_strength = 38.0
 @export var surface_corner_snap_distance = 34.0
 @export var surface_corner_carry_time = 0.16
+@export var surface_hold_probe_extra_distance = 18.0
+@export var surface_hold_probe_spread = 0.82
+@export var ground_corner_capture_distance = 22.0
+@export var wall_ceiling_corner_probe_distance = 48.0
+@export var airborne_ceiling_grab_extra_distance = 8.0
 @export var wall_capture_distance = 22.0
 @export var ceiling_capture_distance = 30.0
 @export var surface_capture_rearm_delay = 0.12
@@ -64,7 +71,7 @@ enum PlayerState {
 @export var tongue_origin = Vector2(14, -16)
 
 @export_group("Grapple")
-@export var grapple_max_length = 360.0
+@export var grapple_max_length = 288.0
 @export var grapple_pull_force = 1150.0
 @export var grapple_spring_strength = 8.0
 @export var grapple_damping = 1.7
@@ -74,8 +81,29 @@ enum PlayerState {
 @export var grapple_release_lift_max = 115.0
 @export var grapple_release_speed_threshold = 260.0
 
+@export_group("Tongue Grapple Pull")
+@export var grapple_range = 240.0
+@export var grapple_pull_speed = 1850.0
+@export var grapple_acceleration = 12000.0
+@export var grapple_stop_distance = 34.0
+@export var grapple_max_duration = 0.28
+@export var grapple_exit_speed_multiplier = 0.72
+
 @export_group("Debug")
 @export var show_debug_state_label = true
+@export var debug_noise_radius = 560.0
+
+@export_group("Noise")
+@export var tongue_noise_radius = 300.0
+@export var tongue_noise_loudness = 0.6
+@export var grapple_pull_noise_radius = 520.0
+@export var grapple_pull_noise_loudness = 1.0
+@export var sprint_noise_radius = 340.0
+@export var sprint_noise_loudness = 0.45
+@export var sprint_noise_interval = 0.45
+@export var hard_landing_noise_radius = 480.0
+@export var hard_landing_noise_loudness = 1.0
+@export var hard_landing_speed_threshold = 520.0
 
 const FLOOR_NORMAL_THRESHOLD = 0.65
 const WALL_NORMAL_THRESHOLD = 0.65
@@ -101,16 +129,22 @@ var stamina_bar_visible_timer = 0.0
 var is_grappling = false
 var grapple_anchor = Vector2.ZERO
 var grapple_length = 0.0
+var is_grapple_pulling = false
+var grapple_pull_anchor = Vector2.ZERO
+var grapple_pull_timer = 0.0
 var tail_anchor = Vector2.ZERO
 var tail_length = 30.0
 var tail_catch_visual_point = Vector2.ZERO
 var tail_catch_visual_timer = 0.0
+var sprint_noise_timer = 0.0
+var was_on_floor_last_frame = false
 
 var tongue: Node2D
 var frog_visual: Node2D
 var debug_state_label: Label
 
 func _ready() -> void:
+	add_to_group("player")
 	motion_mode = CharacterBody2D.MOTION_MODE_GROUNDED
 	up_direction = Vector2.UP
 	floor_snap_length = 6.0
@@ -129,6 +163,7 @@ func _ready() -> void:
 	set_movement_state(PlayerState.AIRBORNE)
 
 func _physics_process(delta: float) -> void:
+	var fall_speed_before_motion = velocity.y
 	reattach_timer = max(reattach_timer - delta, 0.0)
 	capture_rearm_timer = max(capture_rearm_timer - delta, 0.0)
 	capture_commit_timer = max(capture_commit_timer - delta, 0.0)
@@ -136,11 +171,14 @@ func _physics_process(delta: float) -> void:
 	coyote_timer = max(coyote_timer - delta, 0.0)
 	surface_corner_carry_timer = max(surface_corner_carry_timer - delta, 0.0)
 	tail_catch_visual_timer = max(tail_catch_visual_timer - delta, 0.0)
+	sprint_noise_timer = max(sprint_noise_timer - delta, 0.0)
 	_update_stamina(delta)
 
 	match state:
 		PlayerState.GRAPPLING:
 			_update_grapple_motion(delta)
+		PlayerState.GRAPPLE_PULL:
+			_update_grapple_pull_motion(delta)
 		PlayerState.TAIL_HANG:
 			_update_tail_hang(delta)
 		PlayerState.WALL_LEFT, PlayerState.WALL_RIGHT, PlayerState.CEILING:
@@ -150,6 +188,7 @@ func _physics_process(delta: float) -> void:
 
 	_update_visual_orientation()
 	_update_debug_state_label()
+	_update_noise_emission(fall_speed_before_motion)
 	queue_redraw()
 
 func set_movement_state(new_state, surface_normal = Vector2.ZERO, contact_point = Vector2.ZERO) -> void:
@@ -160,6 +199,9 @@ func set_movement_state(new_state, surface_normal = Vector2.ZERO, contact_point 
 
 	if new_state != PlayerState.GRAPPLING:
 		is_grappling = false
+
+	if new_state != PlayerState.GRAPPLE_PULL:
+		is_grapple_pulling = false
 
 	if not _is_surface_state(new_state):
 		attached_normal = Vector2.ZERO
@@ -184,13 +226,19 @@ func set_movement_state(new_state, surface_normal = Vector2.ZERO, contact_point 
 		is_grappling = true
 		ceiling_contact_grace_timer = 0.0
 
+	if state == PlayerState.GRAPPLE_PULL:
+		attached_normal = Vector2.ZERO
+		attached_contact_point = Vector2.ZERO
+		is_grapple_pulling = true
+		ceiling_contact_grace_timer = 0.0
+
 	if state != PlayerState.CEILING:
 		ceiling_contact_grace_timer = 0.0
 
 	if _is_surface_state(previous_state) and _is_surface_state(state) and previous_state != state:
 		surface_transition_lock_timer = surface_transition_lock_time
 
-	if state == PlayerState.GRAPPLING or state == PlayerState.TAIL_HANG or _is_surface_state(state):
+	if state == PlayerState.GRAPPLING or state == PlayerState.GRAPPLE_PULL or state == PlayerState.TAIL_HANG or _is_surface_state(state):
 		coyote_timer = 0.0
 
 	_update_debug_state_label()
@@ -222,6 +270,8 @@ func _update_platformer_motion(delta: float) -> void:
 			velocity.x = move_toward(velocity.x, 0.0, ground_deceleration * delta)
 
 	move_and_slide()
+	if _try_ground_to_wall_corner_transition(input_axis):
+		return
 	if _try_surface_capture_assist(delta):
 		return
 	_try_attach_from_contacts()
@@ -246,6 +296,11 @@ func _update_surface_crawl(delta: float) -> void:
 
 	if state == PlayerState.CEILING and not is_zero_approx(along_input):
 		facing_direction = int(sign(along_input))
+
+	if _try_surface_corner_transition(previous_state, delta):
+		move_and_slide()
+		_hold_attached_surface(delta)
+		return
 
 	move_and_slide()
 
@@ -317,25 +372,50 @@ func _update_grapple_motion(delta: float) -> void:
 	move_and_slide()
 	_try_surface_capture_assist(delta)
 
+func _update_grapple_pull_motion(delta: float) -> void:
+	grapple_pull_timer += delta
+	var to_anchor = grapple_pull_anchor - global_position
+	var distance = to_anchor.length()
+
+	if distance <= grapple_stop_distance or grapple_pull_timer >= grapple_max_duration:
+		_finish_grapple_pull()
+		return
+
+	var direction = to_anchor / max(distance, 0.001)
+	var target_velocity = direction * grapple_pull_speed
+	velocity = velocity.move_toward(target_velocity, grapple_acceleration * delta)
+	if abs(direction.x) > 0.1:
+		facing_direction = int(sign(direction.x))
+
+	move_and_slide()
+	if _try_surface_capture_assist(delta):
+		return
+
+	if get_slide_collision_count() > 0:
+		_try_attach_from_contacts()
+		if _is_surface_state(state):
+			_clear_tongue_grapple_pull_for_surface_attach()
+
 func _try_surface_corner_transition(previous_state, _delta: float) -> bool:
 	if surface_transition_lock_timer > 0.0:
 		return false
 
 	match previous_state:
 		PlayerState.WALL_LEFT, PlayerState.WALL_RIGHT:
-			if not _wants_wall_to_ceiling_transition():
-				return false
-			var ceiling_hit = _find_ceiling_for_wall_corner(previous_state)
-			if ceiling_hit.is_empty():
-				return false
-			var wall_to_ceiling_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
-			var ceiling_speed = ceiling_sprint_speed if wall_to_ceiling_sprint else ceiling_crawl_speed
-			set_movement_state(PlayerState.CEILING, ceiling_hit["normal"], ceiling_hit["position"])
-			var ceiling_direction = 1.0 if previous_state == PlayerState.WALL_LEFT else -1.0
-			velocity = Vector2(ceiling_direction * ceiling_speed, -surface_adhesion_strength)
-			_set_surface_corner_carry(velocity)
-			print("SURFACE TRANSITION: ", _get_state_label(previous_state), " -> CEILING")
-			return true
+			if _wants_wall_to_floor_transition():
+				var floor_hit = _find_floor_for_wall_corner(previous_state)
+				if not floor_hit.is_empty():
+					var wall_to_floor_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
+					var floor_speed = sprint_move_speed if wall_to_floor_sprint else normal_move_speed
+					var floor_direction = 1.0 if previous_state == PlayerState.WALL_LEFT else -1.0
+					set_movement_state(PlayerState.GROUNDED)
+					velocity = Vector2(floor_direction * floor_speed, surface_adhesion_strength)
+					capture_commit_timer = surface_capture_commit_time
+					surface_transition_lock_timer = surface_transition_lock_time
+					_set_surface_corner_carry(velocity)
+					print("SURFACE TRANSITION: ", _get_state_label(previous_state), " -> GROUNDED")
+					return true
+			return _try_wall_to_ceiling_corner_transition(previous_state)
 		PlayerState.CEILING:
 			var horizontal_input = _get_horizontal_input()
 			if not _wants_ceiling_to_wall_transition(horizontal_input):
@@ -348,17 +428,70 @@ func _try_surface_corner_transition(previous_state, _delta: float) -> bool:
 				return false
 			var ceiling_to_wall_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
 			var wall_speed = wall_sprint_speed if ceiling_to_wall_sprint else wall_crawl_speed
+			_align_to_captured_surface(wall_hit)
 			set_movement_state(target_state, wall_hit["normal"], wall_hit["position"])
 			velocity = Vector2(-attached_normal.x * surface_adhesion_strength, wall_speed)
+			capture_commit_timer = surface_capture_commit_time
+			surface_transition_lock_timer = surface_transition_lock_time
 			_set_surface_corner_carry(velocity)
 			print("SURFACE TRANSITION: CEILING -> ", _get_state_label(target_state))
 			return true
 	return false
 
+func _try_ground_to_wall_corner_transition(horizontal_input: float) -> bool:
+	if surface_transition_lock_timer > 0.0:
+		return false
+	if not is_on_floor() or is_zero_approx(horizontal_input):
+		return false
+	var wall_hit = _find_wall_in_direction(sign(horizontal_input), ground_corner_capture_distance)
+	if wall_hit.is_empty():
+		return false
+	var target_state = _state_from_normal(wall_hit["normal"])
+	if not _is_surface_state(target_state):
+		return false
+	_align_to_captured_surface(wall_hit)
+	set_movement_state(target_state, wall_hit["normal"], wall_hit["position"])
+	var ground_to_wall_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
+	var wall_speed = wall_sprint_speed if ground_to_wall_sprint else wall_crawl_speed
+	velocity = -attached_normal * surface_adhesion_strength + Vector2.UP * wall_speed
+	capture_commit_timer = surface_capture_commit_time
+	surface_transition_lock_timer = surface_transition_lock_time
+	_set_surface_corner_carry(velocity)
+	print("SURFACE TRANSITION: GROUNDED -> ", _get_state_label(target_state))
+	return true
+
+func _try_wall_to_ceiling_corner_transition(wall_state) -> bool:
+	if surface_transition_lock_timer > 0.0:
+		return false
+	if wall_state != PlayerState.WALL_LEFT and wall_state != PlayerState.WALL_RIGHT:
+		return false
+	if not _wants_wall_to_ceiling_transition():
+		return false
+	var ceiling_hit = _find_ceiling_for_wall_corner(wall_state)
+	if ceiling_hit.is_empty():
+		return false
+	_align_to_captured_surface(ceiling_hit)
+	var wall_to_ceiling_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
+	var ceiling_speed = ceiling_sprint_speed if wall_to_ceiling_sprint else ceiling_crawl_speed
+	set_movement_state(PlayerState.CEILING, ceiling_hit["normal"], ceiling_hit["position"])
+	var ceiling_direction = _get_ceiling_corner_exit_direction(wall_state)
+	velocity = Vector2(ceiling_direction * ceiling_speed, -surface_adhesion_strength)
+	capture_commit_timer = surface_capture_commit_time
+	ceiling_contact_grace_timer = ceiling_contact_grace_time
+	surface_transition_lock_timer = surface_transition_lock_time
+	_set_surface_corner_carry(velocity)
+	print("SURFACE TRANSITION: ", _get_state_label(wall_state), " -> CEILING")
+	return true
+
 func _wants_wall_to_ceiling_transition() -> bool:
 	if _get_vertical_crawl_input() <= 0.0:
 		return false
 	return velocity.dot(Vector2.UP) >= -20.0
+
+func _wants_wall_to_floor_transition() -> bool:
+	if _get_vertical_crawl_input() >= 0.0:
+		return false
+	return velocity.dot(Vector2.DOWN) >= -20.0
 
 func _wants_ceiling_to_wall_transition(horizontal_input: float) -> bool:
 	if is_zero_approx(horizontal_input):
@@ -389,6 +522,8 @@ func _get_state_label(check_state) -> String:
 			return "TAIL_HANG"
 		PlayerState.GRAPPLING:
 			return "GRAPPLING"
+		PlayerState.GRAPPLE_PULL:
+			return "GRAPPLE_PULL"
 	return "UNKNOWN"
 
 func _set_surface_corner_carry(carry_velocity: Vector2) -> void:
@@ -398,7 +533,7 @@ func _set_surface_corner_carry(carry_velocity: Vector2) -> void:
 func _try_surface_capture_assist(delta: float) -> bool:
 	if capture_rearm_timer > 0.0 or reattach_timer > 0.0:
 		return false
-	if state != PlayerState.AIRBORNE and state != PlayerState.GRAPPLING:
+	if state != PlayerState.AIRBORNE and state != PlayerState.GRAPPLING and state != PlayerState.GRAPPLE_PULL:
 		return false
 	if velocity.length() < 45.0:
 		return false
@@ -415,12 +550,14 @@ func _try_surface_capture_assist(delta: float) -> bool:
 		return false
 
 	_show_tail_catch_visual(capture_hit["position"])
+	HumanNoiseEvents.emit_noise(self, capture_hit["position"], grapple_pull_noise_loudness, grapple_pull_noise_radius, &"surface_attach")
 	_align_to_captured_surface(capture_hit)
 	set_movement_state(target_state, normal, capture_hit["position"])
 	velocity = _get_surface_attach_velocity(normal)
 	capture_commit_timer = surface_capture_commit_time
 	capture_rearm_timer = surface_capture_rearm_delay
 	_clear_tongue_grapple_for_surface_attach()
+	_clear_tongue_grapple_pull_for_surface_attach()
 	return true
 
 func _get_capture_contact_from_slides() -> Dictionary:
@@ -439,8 +576,7 @@ func _get_capture_contact_from_slides() -> Dictionary:
 func _find_surface_capture_hit() -> Dictionary:
 	var candidates = []
 	if velocity.y < -35.0:
-		var ceiling_origin = global_position + Vector2(0.0, -BODY_HALF_HEIGHT)
-		var ceiling_hit = _raycast_level_surface(ceiling_origin, ceiling_origin + Vector2.UP * ceiling_capture_distance)
+		var ceiling_hit = _find_ceiling_in_reach(ceiling_capture_distance + airborne_ceiling_grab_extra_distance)
 		if _is_ceiling_hit(ceiling_hit) and _is_moving_toward_surface(ceiling_hit["normal"]):
 			candidates.append(ceiling_hit)
 
@@ -481,9 +617,9 @@ func _align_to_captured_surface(hit: Dictionary) -> void:
 	var hit_position = hit["position"]
 	var body_radius = _get_surface_body_radius(normal)
 	var desired_position = hit_position + normal * (body_radius + surface_attach_offset)
-	var offset = desired_position - global_position
+	var offset = normal * (desired_position - global_position).dot(normal)
 	var max_snap = max(wall_capture_distance, ceiling_capture_distance) + surface_attach_offset + 2.0
-	if offset.length() <= max_snap:
+	if abs(offset.dot(normal)) <= max_snap:
 		global_position += offset
 
 func _get_surface_body_radius(normal: Vector2) -> float:
@@ -502,6 +638,7 @@ func _confirm_committed_surface() -> bool:
 	if normal.dot(attached_normal) <= 0.72:
 		return false
 	attached_contact_point = hit["position"]
+	_align_to_captured_surface(hit)
 	if state == PlayerState.CEILING:
 		ceiling_contact_grace_timer = ceiling_contact_grace_time
 	return true
@@ -516,6 +653,7 @@ func _hold_attached_surface(delta: float) -> bool:
 
 	attached_normal = _cardinalize_surface_normal(hit["normal"])
 	attached_contact_point = hit["position"]
+	_align_to_captured_surface(hit)
 	return true
 
 func _find_attached_surface_hold_hit() -> Dictionary:
@@ -524,19 +662,7 @@ func _find_attached_surface_hold_hit() -> Dictionary:
 	var normal = attached_normal
 	if normal == Vector2.ZERO:
 		return {}
-	var probe_distance = _get_surface_body_radius(normal) + surface_attach_offset + 6.0
-	var probe_offsets = [
-		Vector2.ZERO,
-		Vector2.UP * BODY_HALF_HEIGHT * 0.55,
-		Vector2.DOWN * BODY_HALF_HEIGHT * 0.55,
-	]
-	for probe_offset in probe_offsets:
-		var probe_from = global_position + probe_offset
-		var probe_to = probe_from - normal * probe_distance
-		var hit = _raycast_level_surface(probe_from, probe_to)
-		if _is_wall_hit(hit) and hit["normal"].dot(normal) > 0.72:
-			return hit
-	return {}
+	return _find_surface_hold_hit(normal)
 
 func _hold_ceiling_contact(delta: float) -> bool:
 	var hit = _find_ceiling_hold_hit()
@@ -544,6 +670,7 @@ func _hold_ceiling_contact(delta: float) -> bool:
 		attached_normal = _cardinalize_surface_normal(hit["normal"])
 		attached_contact_point = hit["position"]
 		ceiling_contact_grace_timer = ceiling_contact_grace_time
+		_align_to_captured_surface(hit)
 		_remove_ceiling_outward_velocity()
 		return true
 
@@ -557,17 +684,34 @@ func _find_ceiling_hold_hit() -> Dictionary:
 	var normal = attached_normal
 	if normal == Vector2.ZERO:
 		normal = Vector2.DOWN
-	var probe_distance = _get_surface_body_radius(normal) + surface_attach_offset + ceiling_hold_check_distance
+	return _find_surface_hold_hit(normal, ceiling_hold_check_distance)
+
+func _find_surface_hold_hit(normal: Vector2, extra_distance: float = -1.0) -> Dictionary:
+	var cardinal_normal = _cardinalize_surface_normal(normal)
+	if cardinal_normal == Vector2.ZERO:
+		return {}
+	var tangent = _get_tangent_for_normal(cardinal_normal)
+	var body_radius = _get_surface_body_radius(cardinal_normal)
+	var tangent_radius = BODY_HALF_HEIGHT if abs(cardinal_normal.x) > abs(cardinal_normal.y) else BODY_HALF_WIDTH
+	var probe_distance = body_radius + surface_attach_offset + surface_hold_probe_extra_distance
+	if extra_distance >= 0.0:
+		probe_distance = body_radius + surface_attach_offset + max(extra_distance, surface_hold_probe_extra_distance)
+	var spread = tangent_radius * surface_hold_probe_spread
 	var probe_offsets = [
 		Vector2.ZERO,
-		Vector2.LEFT * BODY_HALF_WIDTH * 0.65,
-		Vector2.RIGHT * BODY_HALF_WIDTH * 0.65,
+		tangent * spread,
+		-tangent * spread,
+		tangent * spread * 0.5,
+		-tangent * spread * 0.5,
 	]
 	for probe_offset in probe_offsets:
 		var probe_from = global_position + probe_offset
-		var probe_to = probe_from - normal * probe_distance
+		var probe_to = probe_from - cardinal_normal * probe_distance
 		var hit = _raycast_level_surface(probe_from, probe_to)
-		if _is_ceiling_hit(hit) and hit["normal"].dot(normal) > 0.72:
+		if hit.is_empty():
+			continue
+		var hit_normal = _cardinalize_surface_normal(hit["normal"])
+		if hit_normal.dot(cardinal_normal) > 0.72:
 			return hit
 	return {}
 
@@ -599,16 +743,32 @@ func _clear_tongue_grapple_for_surface_attach() -> void:
 	if tongue and tongue.has_method("clear_grapple_without_player_release"):
 		tongue.clear_grapple_without_player_release()
 
+func _clear_tongue_grapple_pull_for_surface_attach() -> void:
+	is_grapple_pulling = false
+	grapple_pull_anchor = Vector2.ZERO
+	grapple_pull_timer = 0.0
+	if tongue and tongue.has_method("clear_grapple_pull_without_player_release"):
+		tongue.clear_grapple_pull_without_player_release()
+
 func _find_ceiling_for_wall_corner(wall_state) -> Dictionary:
-	var wall_direction = -1.0 if wall_state == PlayerState.WALL_RIGHT else 1.0
+	var exit_direction = _get_ceiling_corner_exit_direction(wall_state)
+	var search_distance = max(wall_ceiling_corner_probe_distance, ceiling_capture_distance)
+	var side = Vector2.RIGHT * exit_direction
 	var probes = [
-		global_position + Vector2(wall_direction * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT),
 		global_position + Vector2(0.0, -BODY_HALF_HEIGHT),
-		global_position + Vector2(wall_direction * BODY_HALF_WIDTH, 0.0),
+		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 0.35, -BODY_HALF_HEIGHT),
+		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 0.85, -BODY_HALF_HEIGHT),
+		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 1.25, -BODY_HALF_HEIGHT),
+		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 1.25, -BODY_HALF_HEIGHT * 0.45),
+		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 0.35, -BODY_HALF_HEIGHT * 0.72),
+		global_position + Vector2(-exit_direction * BODY_HALF_WIDTH * 0.25, -BODY_HALF_HEIGHT * 0.72),
 	]
 
 	for probe_origin in probes:
-		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.UP * surface_corner_snap_distance)
+		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.UP * search_distance)
+		if _is_ceiling_hit(hit):
+			return hit
+		hit = _raycast_level_surface(probe_origin, probe_origin + (Vector2.UP + side).normalized() * search_distance)
 		if _is_ceiling_hit(hit):
 			return hit
 
@@ -619,16 +779,38 @@ func _find_ceiling_for_wall_corner(wall_state) -> Dictionary:
 			return {"normal": normal, "position": collision.get_position()}
 	return {}
 
+func _find_ceiling_in_reach(distance: float) -> Dictionary:
+	var probes = [
+		global_position + Vector2(0.0, -BODY_HALF_HEIGHT),
+		global_position + Vector2(-BODY_HALF_WIDTH * 0.75, -BODY_HALF_HEIGHT),
+		global_position + Vector2(BODY_HALF_WIDTH * 0.75, -BODY_HALF_HEIGHT),
+		global_position + Vector2(-BODY_HALF_WIDTH * 0.35, -BODY_HALF_HEIGHT),
+		global_position + Vector2(BODY_HALF_WIDTH * 0.35, -BODY_HALF_HEIGHT),
+	]
+	for probe_origin in probes:
+		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.UP * distance)
+		if _is_ceiling_hit(hit):
+			return hit
+	return {}
+
+func _get_ceiling_corner_exit_direction(wall_state) -> float:
+	return 1.0 if wall_state == PlayerState.WALL_LEFT else -1.0
+
 func _find_wall_for_ceiling_corner(horizontal_input: float) -> Dictionary:
 	var direction = sign(horizontal_input)
+	var hit = _find_wall_in_direction(direction, surface_corner_snap_distance)
+	if not hit.is_empty():
+		return hit
+	var side = 1.0 if direction > 0.0 else -1.0
+	var search_distance = max(surface_corner_snap_distance, wall_capture_distance + BODY_HALF_WIDTH)
 	var probes = [
-		global_position + Vector2(direction * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT),
-		global_position + Vector2(direction * BODY_HALF_WIDTH, 0.0),
-		global_position + Vector2(direction * BODY_HALF_WIDTH, BODY_HALF_HEIGHT * 0.5),
+		global_position + Vector2(side * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT * 0.55),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, -BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, 0.0),
 	]
-
 	for probe_origin in probes:
-		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.RIGHT * direction * surface_corner_snap_distance)
+		hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.RIGHT * side * search_distance)
 		if _is_wall_hit(hit):
 			return hit
 
@@ -636,6 +818,45 @@ func _find_wall_for_ceiling_corner(horizontal_input: float) -> Dictionary:
 		var collision = get_slide_collision(index)
 		var normal = collision.get_normal()
 		if abs(normal.x) > WALL_NORMAL_THRESHOLD:
+			return {"normal": normal, "position": collision.get_position()}
+	return {}
+
+func _find_wall_in_direction(direction: float, distance: float) -> Dictionary:
+	if is_zero_approx(direction):
+		return {}
+	var side = 1.0 if direction > 0.0 else -1.0
+	var search_distance = max(distance, ground_corner_capture_distance)
+	var probes = [
+		global_position + Vector2(side * BODY_HALF_WIDTH, 0.0),
+		global_position + Vector2(side * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT * 0.7),
+		global_position + Vector2(side * BODY_HALF_WIDTH, BODY_HALF_HEIGHT * 0.55),
+		global_position + Vector2(side * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, -BODY_HALF_HEIGHT * 1.05),
+	]
+	for probe_origin in probes:
+		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.RIGHT * side * search_distance)
+		if _is_wall_hit(hit):
+			return hit
+	return {}
+
+func _find_floor_for_wall_corner(wall_state) -> Dictionary:
+	var side = -1.0 if wall_state == PlayerState.WALL_RIGHT else 1.0
+	var probes = [
+		global_position + Vector2(0.0, BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 0.65, BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH, BODY_HALF_HEIGHT * 0.5),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, BODY_HALF_HEIGHT),
+		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, BODY_HALF_HEIGHT * 0.25),
+	]
+	for probe_origin in probes:
+		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.DOWN * surface_corner_snap_distance)
+		if _is_floor_hit(hit):
+			return hit
+	for index in range(get_slide_collision_count()):
+		var collision = get_slide_collision(index)
+		var normal = collision.get_normal()
+		if _is_floor_normal(normal):
 			return {"normal": normal, "position": collision.get_position()}
 	return {}
 
@@ -650,7 +871,7 @@ func _raycast_level_surface(from: Vector2, to: Vector2) -> Dictionary:
 	if hit.is_empty():
 		return {}
 	var collider = hit.get("collider")
-	if collider is StaticBody2D:
+	if collider is StaticBody2D or (collider is Node and collider.is_in_group("grapple_surface")):
 		return hit
 	return {}
 
@@ -665,6 +886,11 @@ func _is_wall_hit(hit: Dictionary) -> bool:
 		return false
 	var normal = hit.get("normal", Vector2.ZERO)
 	return abs(normal.x) > WALL_NORMAL_THRESHOLD
+
+func _is_floor_hit(hit: Dictionary) -> bool:
+	if hit.is_empty():
+		return false
+	return _is_floor_normal(hit.get("normal", Vector2.ZERO))
 
 func _try_attach_from_contacts() -> void:
 	if reattach_timer > 0.0:
@@ -722,6 +948,37 @@ func start_grapple(anchor: Vector2, requested_length: float) -> void:
 	grapple_length = clamp(requested_length, 24.0, grapple_max_length)
 	reattach_timer = surface_reattach_delay
 	set_movement_state(PlayerState.GRAPPLING)
+
+func start_grapple_pull(anchor: Vector2) -> bool:
+	var origin = get_tongue_origin_global()
+	if origin.distance_to(anchor) > grapple_range:
+		return false
+
+	if state == PlayerState.TAIL_HANG:
+		_clear_tail_data()
+
+	grapple_pull_anchor = anchor
+	grapple_pull_timer = 0.0
+	reattach_timer = 0.0
+	capture_rearm_timer = 0.0
+	capture_commit_timer = 0.0
+	set_movement_state(PlayerState.GRAPPLE_PULL)
+	return true
+
+func cancel_grapple_pull() -> void:
+	if state != PlayerState.GRAPPLE_PULL and not is_grapple_pulling:
+		return
+	_finish_grapple_pull()
+
+func _finish_grapple_pull() -> void:
+	var saved_velocity = velocity * grapple_exit_speed_multiplier
+	is_grapple_pulling = false
+	grapple_pull_anchor = Vector2.ZERO
+	grapple_pull_timer = 0.0
+	set_movement_state(PlayerState.AIRBORNE)
+	velocity = saved_velocity
+	_clear_tongue_grapple_pull_for_surface_attach()
+	_try_surface_capture_assist(0.0)
 
 func release_grapple() -> void:
 	if state != PlayerState.GRAPPLING and not is_grappling:
@@ -870,6 +1127,8 @@ func _is_floor_normal(normal: Vector2) -> bool:
 	return normal.y <= -FLOOR_NORMAL_THRESHOLD
 
 func _add_collision() -> void:
+	if get_node_or_null("CollisionShape2D"):
+		return
 	var collision = CollisionShape2D.new()
 	collision.name = "CollisionShape2D"
 	var capsule = CapsuleShape2D.new()
@@ -880,26 +1139,39 @@ func _add_collision() -> void:
 	add_child(collision)
 
 func _add_visuals() -> void:
-	frog_visual = FrogScene.instantiate() as Node2D
-	frog_visual.name = "Frog"
+	frog_visual = get_node_or_null("Visuals") as Node2D
+	if frog_visual:
+		return
+	frog_visual = PlayerVisualScene.instantiate() as Node2D
+	frog_visual.name = "Visuals"
 	add_child(frog_visual)
 
 func _add_tongue() -> void:
+	tongue = get_node_or_null("Tongue") as Node2D
+	if tongue:
+		tongue.player = self
+		return
 	tongue = TongueScene.instantiate() as Node2D
 	tongue.name = "Tongue"
 	tongue.player = self
 	add_child(tongue)
 
 func _add_camera() -> void:
-	var camera = Camera2D.new()
+	var camera = get_node_or_null("Camera2D") as Camera2D
+	if not camera:
+		camera = Camera2D.new()
+		camera.name = "Camera2D"
+		add_child(camera)
 	camera.name = "Camera2D"
 	camera.position_smoothing_enabled = true
 	camera.position_smoothing_speed = 8.0
 	camera.zoom = Vector2(1.0, 1.0)
 	camera.make_current()
-	add_child(camera)
 
 func _add_debug_state_label() -> void:
+	debug_state_label = get_node_or_null("DebugStateLabel") as Label
+	if debug_state_label:
+		return
 	debug_state_label = Label.new()
 	debug_state_label.name = "DebugStateLabel"
 	debug_state_label.position = Vector2(-70, -78)
@@ -914,6 +1186,9 @@ func _add_debug_state_label() -> void:
 
 func _update_visual_orientation() -> void:
 	if not frog_visual:
+		return
+	if frog_visual.has_method("update_from_player"):
+		frog_visual.update_from_player(self)
 		return
 
 	match state:
@@ -936,6 +1211,16 @@ func _update_debug_state_label() -> void:
 	debug_state_label.visible = show_debug_state_label
 	debug_state_label.text = _get_state_name()
 
+func _update_noise_emission(fall_speed_before_motion: float) -> void:
+	if Input.is_action_just_pressed("debug_noise"):
+		HumanNoiseEvents.emit_noise(self, global_position, 1.0, debug_noise_radius, &"debug")
+	if _is_sprinting() and sprint_noise_timer <= 0.0:
+		HumanNoiseEvents.emit_noise(self, global_position, sprint_noise_loudness, sprint_noise_radius, &"sprint")
+		sprint_noise_timer = sprint_noise_interval
+	if is_on_floor() and not was_on_floor_last_frame and fall_speed_before_motion >= hard_landing_speed_threshold:
+		HumanNoiseEvents.emit_noise(self, global_position, hard_landing_noise_loudness, hard_landing_noise_radius, &"hard_landing")
+	was_on_floor_last_frame = is_on_floor()
+
 func _get_state_name() -> String:
 	var suffix = " [SPRINT]" if _is_sprinting() else ""
 	if capture_commit_timer > 0.0 and _is_surface_state(state):
@@ -957,6 +1242,8 @@ func _get_state_name() -> String:
 			return "TAIL_HANG"
 		PlayerState.GRAPPLING:
 			return "GRAPPLING"
+		PlayerState.GRAPPLE_PULL:
+			return "GRAPPLE_PULL"
 	return "UNKNOWN"
 
 func _draw() -> void:

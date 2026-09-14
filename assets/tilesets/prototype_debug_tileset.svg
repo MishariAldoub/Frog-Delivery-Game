@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <style>
+      .cell { fill: #182026; stroke: #4b5963; stroke-width: 1; }
+      .solid { fill: #58636f; }
+      .platform { fill: #6b7d52; }
+      .wall { fill: #4f7480; }
+      .ledge { fill: #806c4f; }
+      .outside { fill: #6f5f86; }
+      .inside { fill: #80605a; }
+      .line { stroke: #d8e3e8; stroke-width: 1.5; fill: none; opacity: 0.8; }
+      .label { fill: #f5f0d0; font: 5px sans-serif; text-anchor: middle; }
+    </style>
+  </defs>
+  <rect width="128" height="128" fill="#10161b"/>
+  <g>
+    <rect class="cell" x="0" y="0" width="32" height="32"/><rect class="solid" x="2" y="2" width="28" height="28"/><text class="label" x="16" y="18">FULL</text>
+    <rect class="cell" x="32" y="0" width="32" height="32"/><rect class="platform" x="34" y="8" width="28" height="22"/><path class="line" d="M36 9.5H60"/><text class="label" x="48" y="23">FLOOR</text>
+    <rect class="cell" x="64" y="0" width="32" height="32"/><rect class="platform" x="66" y="2" width="28" height="22"/><path class="line" d="M68 22.5H92"/><text class="label" x="80" y="14">CEIL</text>
+    <rect class="cell" x="96" y="0" width="32" height="32"/><rect class="wall" x="98" y="2" width="22" height="28"/><path class="line" d="M119 4V28"/><text class="label" x="112" y="18">L WALL</text>
+
+    <rect class="cell" x="0" y="32" width="32" height="32"/><rect class="wall" x="8" y="34" width="22" height="28"/><path class="line" d="M9 36V60"/><text class="label" x="16" y="50">R WALL</text>
+    <rect class="cell" x="32" y="32" width="32" height="32"/><rect class="ledge" x="34" y="48" width="14" height="14"/><text class="label" x="48" y="45">LEDGE L</text>
+    <rect class="cell" x="64" y="32" width="32" height="32"/><rect class="ledge" x="80" y="48" width="14" height="14"/><text class="label" x="80" y="45">LEDGE R</text>
+    <rect class="cell" x="96" y="32" width="32" height="32"/><rect class="platform" x="98" y="45" width="28" height="6"/><text class="label" x="112" y="58">THIN</text>
+
+    <rect class="cell" x="0" y="64" width="32" height="32"/><rect class="outside" x="2" y="66" width="28" height="28"/><path class="line" d="M16 66V94M2 80H30"/><text class="label" x="16" y="84">OUT 1</text>
+    <rect class="cell" x="32" y="64" width="32" height="32"/><rect class="outside" x="34" y="66" width="28" height="28"/><path class="line" d="M48 66V94M34 80H62"/><text class="label" x="48" y="84">OUT 2</text>
+    <rect class="cell" x="64" y="64" width="32" height="32"/><rect class="outside" x="66" y="66" width="28" height="28"/><path class="line" d="M80 66V94M66 80H94"/><text class="label" x="80" y="84">OUT 3</text>
+    <rect class="cell" x="96" y="64" width="32" height="32"/><rect class="outside" x="98" y="66" width="28" height="28"/><path class="line" d="M112 66V94M98 80H126"/><text class="label" x="112" y="84">OUT 4</text>
+
+    <rect class="cell" x="0" y="96" width="32" height="32"/><path class="inside" d="M16 98H30V126H2V112H16Z"/><text class="label" x="16" y="116">IN TL</text>
+    <rect class="cell" x="32" y="96" width="32" height="32"/><path class="inside" d="M34 98H48V112H62V126H34Z"/><text class="label" x="48" y="116">IN TR</text>
+    <rect class="cell" x="64" y="96" width="32" height="32"/><path class="inside" d="M80 112H66V98H94V126H80Z"/><text class="label" x="80" y="116">IN BL</text>
+    <rect class="cell" x="96" y="96" width="32" height="32"/><path class="inside" d="M98 98H126V112H112V126H98Z"/><text class="label" x="112" y="116">IN BR</text>
+  </g>
+</svg>

@@ -1,0 +1,37 @@
+[gd_scene format=3 uid="uid://ccw16bmhsqi8p"]
+
+[ext_resource type="Script" uid="uid://cq2efbq76snip" path="res://scripts/player.gd" id="1_player"]
+[ext_resource type="PackedScene" path="res://scenes/PlayerVisual.tscn" id="2_visual"]
+[ext_resource type="PackedScene" uid="uid://dn7ce3sii65u1" path="res://scenes/Tongue.tscn" id="3_tongue"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_player"]
+radius = 18.0
+height = 60.0
+
+[node name="Player" type="CharacterBody2D" unique_id=207786728 groups=["player"]]
+script = ExtResource("1_player")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=494439777]
+position = Vector2(0, 2)
+shape = SubResource("CapsuleShape2D_player")
+
+[node name="Visuals" parent="." unique_id=578702648 instance=ExtResource("2_visual")]
+
+[node name="Tongue" parent="." unique_id=1081333741 instance=ExtResource("3_tongue")]
+max_range = 150.0
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=68109210]
+position_smoothing_enabled = true
+position_smoothing_speed = 8.0
+
+[node name="DebugStateLabel" type="Label" parent="." unique_id=448976838]
+offset_left = -70.0
+offset_top = -78.0
+offset_right = 70.0
+offset_bottom = -58.0
+theme_override_colors/font_color = Color(0.843137, 0.968627, 0.811765, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.8)
+theme_override_constants/shadow_offset_x = 1
+theme_override_constants/shadow_offset_y = 1
+horizontal_alignment = 1
+vertical_alignment = 1

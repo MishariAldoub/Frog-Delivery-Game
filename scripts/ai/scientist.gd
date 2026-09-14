@@ -1,0 +1,447 @@
+extends HumanAI
+class_name Scientist
+
+enum ScientistState {
+	WORKING,
+	WANDERING,
+	IDLE,
+	SUSPICIOUS,
+	AIMING,
+	ATTACKING,
+}
+
+@export_group("Scientist Routine")
+@export var work_point_group = "scientist_work_point"
+@export var wander_point_group = "scientist_wander_point"
+@export var default_work_duration_min = 4.0
+@export var default_work_duration_max = 8.0
+@export var idle_duration_min = 1.0
+@export var idle_duration_max = 3.0
+@export_range(0.0, 1.0, 0.05) var idle_after_work_chance = 0.35
+@export_range(0.0, 1.0, 0.05) var work_destination_chance = 0.65
+
+@export_group("Suspicious Search")
+@export var suspicious_search_duration = 4.0
+@export var suspicious_arrival_distance = 26.0
+@export var suspicious_look_interval = 0.75
+@export var calm_suspicion_target = 8.0
+@export var investigation_stopping_distance = 34.0
+
+@export_group("Pistol")
+@export var aim_reaction_time = 0.9
+@export var lost_sight_aim_time = 2.4
+@export var fire_rate = 1.15
+@export var aim_spread_degrees = 7.0
+@export var aim_tracking_speed = 4.0
+@export var preferred_distance = 260.0
+@export var bullet_range = 520.0
+@export var bullet_damage = 1.0
+@export var shot_noise_radius = 520.0
+@export var shot_noise_loudness = 1.0
+
+@export_group("Navigation")
+@export var same_surface_vertical_tolerance = 72.0
+@export var blocked_repath_delay = 0.8
+
+var state = ScientistState.IDLE
+var state_time = 0.0
+var state_duration = 0.0
+var aim_time = 0.0
+var fire_cooldown = 0.0
+var search_time = 0.0
+var look_cycle_time = 0.0
+var aim_direction = Vector2.RIGHT
+var destination = Vector2.ZERO
+var has_destination = false
+var blocked_repath_timer = 0.0
+var routine_initialized = false
+
+var _work_points: Array[Node2D] = []
+var _wander_points: Array[Node2D] = []
+var _current_point: Node2D
+var _debug_label: Label
+
+func _ready() -> void:
+	super()
+	collision_layer = 2
+	collision_mask = 1
+	_build_body()
+	_build_debug_label()
+	_initialize_routine_after_navigation_sync()
+
+func _initialize_routine_after_navigation_sync() -> void:
+	await get_tree().physics_frame
+	_collect_points()
+	routine_initialized = true
+	_enter_state(ScientistState.WORKING)
+
+func _update_human_ai(delta: float) -> void:
+	if not routine_initialized:
+		stop_horizontal(delta)
+		_update_debug_label()
+		return
+	state_time += delta
+	fire_cooldown = max(fire_cooldown - delta, 0.0)
+	blocked_repath_timer = max(blocked_repath_timer - delta, 0.0)
+	_update_alert_state_from_suspicion()
+
+	match state:
+		ScientistState.WORKING:
+			_update_working(delta)
+		ScientistState.WANDERING:
+			_update_wandering(delta)
+		ScientistState.IDLE:
+			_update_idle(delta)
+		ScientistState.SUSPICIOUS:
+			_update_suspicious(delta)
+		ScientistState.AIMING:
+			_update_aiming(delta)
+		ScientistState.ATTACKING:
+			_update_attacking(delta)
+
+	_update_debug_label()
+
+func on_noise_heard(_world_position: Vector2, _suspicion_gain: float) -> void:
+	if suspicion >= suspicious_threshold and state < ScientistState.SUSPICIOUS:
+		_enter_state(ScientistState.SUSPICIOUS)
+
+func on_warning_received(_source_position: Vector2, _approximate_threat_position: Vector2, _severity: float) -> void:
+	if state < ScientistState.SUSPICIOUS:
+		_enter_state(ScientistState.SUSPICIOUS)
+
+func _update_alert_state_from_suspicion() -> void:
+	if player_visible and suspicion >= attack_threshold and state != ScientistState.ATTACKING:
+		_enter_state(ScientistState.ATTACKING)
+		return
+	if suspicion >= aiming_threshold and state < ScientistState.AIMING:
+		_enter_state(ScientistState.AIMING)
+		return
+	if suspicion >= suspicious_threshold and state < ScientistState.SUSPICIOUS:
+		_enter_state(ScientistState.SUSPICIOUS)
+
+func _update_working(delta: float) -> void:
+	stop_horizontal(delta)
+	if _current_point:
+		var point_facing = _current_point.get("facing_direction")
+		if point_facing is int and point_facing != 0:
+			facing_direction = point_facing
+			look_direction = Vector2.RIGHT * facing_direction
+
+	if state_time >= state_duration:
+		if randf() < idle_after_work_chance:
+			_enter_state(ScientistState.IDLE)
+		else:
+			_choose_destination()
+			_enter_state(ScientistState.WANDERING)
+
+func _update_wandering(delta: float) -> void:
+	if not has_destination:
+		_choose_destination()
+	if not has_destination:
+		_enter_state(ScientistState.IDLE)
+		return
+
+	if move_toward_destination(destination, casual_move_speed, delta):
+		if _current_point and _is_work_point(_current_point):
+			_enter_state(ScientistState.WORKING)
+		else:
+			_enter_state(ScientistState.IDLE)
+	elif movement_blocked_by_ledge and blocked_repath_timer <= 0.0:
+		blocked_repath_timer = blocked_repath_delay
+		_choose_destination()
+		if not has_destination:
+			_enter_state(ScientistState.IDLE)
+
+func _update_idle(delta: float) -> void:
+	stop_horizontal(delta)
+	if state_time >= state_duration:
+		if randf() < 0.5:
+			facing_direction *= -1
+			look_direction = Vector2.RIGHT * facing_direction
+			state_duration += randf_range(0.5, 1.2)
+		else:
+			_choose_destination()
+			_enter_state(ScientistState.WANDERING if has_destination else ScientistState.WORKING)
+
+func _update_suspicious(delta: float) -> void:
+	var investigate = current_investigation_position if has_investigation_position else global_position
+	set_facing_from_vector(investigate - get_eye_position())
+
+	var safe_investigation_position = get_nearest_navigation_position(investigate)
+	if global_position.distance_to(safe_investigation_position) > max(suspicious_arrival_distance, investigation_stopping_distance):
+		if can_reach_navigation_target(safe_investigation_position):
+			move_toward_destination(safe_investigation_position, cautious_move_speed, delta)
+		else:
+			stop_horizontal(delta)
+			search_time += delta
+		if movement_blocked_by_ledge and blocked_repath_timer <= 0.0:
+			blocked_repath_timer = blocked_repath_delay
+			clear_navigation_target()
+		return
+
+	stop_horizontal(delta)
+	search_time += delta
+	look_cycle_time += delta
+	if look_cycle_time >= suspicious_look_interval:
+		look_cycle_time = 0.0
+		facing_direction *= -1
+		look_direction = Vector2.RIGHT * facing_direction
+
+	if search_time >= suspicious_search_duration and suspicion <= calm_suspicion_target:
+		_enter_state(ScientistState.IDLE)
+
+func _update_aiming(delta: float) -> void:
+	stop_horizontal(delta)
+	aim_time += delta
+	_track_aim_toward(get_current_aim_target(), delta)
+
+	if player_visible:
+		if aim_time >= aim_reaction_time and suspicion >= attack_threshold:
+			_enter_state(ScientistState.ATTACKING)
+	elif aim_time >= lost_sight_aim_time:
+		_enter_state(ScientistState.SUSPICIOUS)
+
+func _update_attacking(delta: float) -> void:
+	if not player_visible:
+		_enter_state(ScientistState.AIMING)
+		return
+
+	warn_nearby_humans(1.0)
+	_track_aim_toward(get_current_aim_target(), delta)
+	_move_defensively(delta)
+	if fire_cooldown <= 0.0:
+		_fire_pistol()
+		fire_cooldown = 1.0 / max(fire_rate, 0.01)
+
+func _move_defensively(delta: float) -> void:
+	if not player:
+		stop_horizontal(delta)
+		return
+	var distance = global_position.distance_to(player.global_position)
+	if distance >= preferred_distance:
+		stop_horizontal(delta)
+		return
+	var away = sign(global_position.x - player.global_position.x)
+	if is_zero_approx(away):
+		away = -facing_direction
+	if not can_move_horizontally(away):
+		stop_horizontal(delta)
+		return
+	facing_direction = int(-away)
+	velocity.x = move_toward(velocity.x, away * retreat_move_speed, ground_acceleration * delta)
+	move_and_slide()
+
+func _track_aim_toward(world_position: Vector2, delta: float) -> void:
+	var desired = world_position - get_eye_position()
+	if desired.length_squared() <= 0.001:
+		return
+	aim_direction = aim_direction.slerp(desired.normalized(), clamp(aim_tracking_speed * delta, 0.0, 1.0))
+	look_direction = aim_direction
+	set_facing_from_vector(aim_direction)
+
+func _fire_pistol() -> void:
+	var origin = get_eye_position() + aim_direction.normalized() * 22.0
+	var shot_direction = aim_direction.rotated(deg_to_rad(randf_range(-aim_spread_degrees, aim_spread_degrees))).normalized()
+	var end = origin + shot_direction * bullet_range
+	var query = PhysicsRayQueryParameters2D.create(origin, end)
+	query.collision_mask = vision_collision_mask
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	query.exclude = [get_rid()]
+	var hit = get_world_2d().direct_space_state.intersect_ray(query)
+	if not hit.is_empty():
+		var collider = hit.get("collider")
+		if collider == player and player and player.has_method("take_damage"):
+			player.take_damage(bullet_damage)
+	HumanNoise.emit_noise(self, origin, shot_noise_loudness, shot_noise_radius, &"pistol")
+
+func _enter_state(new_state: int) -> void:
+	if state == new_state:
+		return
+	state = new_state
+	state_time = 0.0
+
+	match state:
+		ScientistState.WORKING:
+			_current_point = _nearest_or_random_work_point()
+			if _current_point:
+				destination = _current_point.global_position
+				has_destination = true
+				if global_position.distance_to(destination) > destination_arrival_distance:
+					state = ScientistState.WANDERING
+				state_duration = _get_point_duration(_current_point, default_work_duration_min, default_work_duration_max, true)
+			else:
+				state_duration = randf_range(default_work_duration_min, default_work_duration_max)
+		ScientistState.WANDERING:
+			if not has_destination:
+				_choose_destination()
+		ScientistState.IDLE:
+			state_duration = randf_range(idle_duration_min, idle_duration_max)
+		ScientistState.SUSPICIOUS:
+			search_time = 0.0
+			look_cycle_time = 0.0
+			if has_last_suspicious_position:
+				current_investigation_position = last_suspicious_position
+				has_investigation_position = true
+		ScientistState.AIMING:
+			aim_time = 0.0
+			var aim_target = get_current_aim_target()
+			aim_direction = (aim_target - get_eye_position()).normalized() if aim_target != Vector2.ZERO else Vector2.RIGHT * facing_direction
+		ScientistState.ATTACKING:
+			aim_time = 0.0
+			fire_cooldown = min(fire_cooldown, 0.15)
+	_update_debug_label()
+
+func _choose_destination() -> void:
+	_collect_points()
+	var candidates: Array[Node2D] = []
+	if randf() < work_destination_chance and not _work_points.is_empty():
+		candidates = _work_points.duplicate()
+	elif not _wander_points.is_empty():
+		candidates = _wander_points.duplicate()
+	else:
+		candidates = _work_points.duplicate()
+
+	candidates = _filter_reachable_points(candidates)
+	if candidates.is_empty():
+		has_destination = false
+		clear_navigation_target()
+		return
+
+	_current_point = candidates.pick_random()
+	destination = _current_point.global_position
+	has_destination = true
+	set_navigation_target(destination, true)
+
+func _nearest_or_random_work_point() -> Node2D:
+	_collect_points()
+	if _work_points.is_empty():
+		return null
+	var reachable_points = _filter_reachable_points(_work_points)
+	if reachable_points.is_empty():
+		return null
+	var nearest: Node2D
+	var nearest_distance = INF
+	for point in reachable_points:
+		var distance = global_position.distance_to(point.global_position)
+		if distance < nearest_distance:
+			nearest_distance = distance
+			nearest = point
+	if nearest and nearest_distance <= destination_arrival_distance * 2.0:
+		return nearest
+	return reachable_points.pick_random()
+
+func _filter_reachable_points(points: Array[Node2D]) -> Array[Node2D]:
+	var reachable: Array[Node2D] = []
+	for point in points:
+		if not is_instance_valid(point):
+			continue
+		if abs(point.global_position.y - global_position.y) > same_surface_vertical_tolerance:
+			continue
+		if not can_reach_navigation_target(point.global_position):
+			continue
+		reachable.append(point)
+	return reachable
+
+func _collect_points() -> void:
+	_work_points.clear()
+	_wander_points.clear()
+	for node in get_tree().get_nodes_in_group(work_point_group):
+		if node is Node2D:
+			_work_points.append(node)
+	for node in get_tree().get_nodes_in_group(wander_point_group):
+		if node is Node2D:
+			_wander_points.append(node)
+
+func _is_work_point(point: Node) -> bool:
+	return point and point.is_in_group(work_point_group)
+
+func _get_point_duration(point: Node, fallback_min: float, fallback_max: float, working: bool) -> float:
+	if not point:
+		return randf_range(fallback_min, fallback_max)
+	var min_property = "work_duration_min" if working else "idle_duration_min"
+	var max_property = "work_duration_max" if working else "idle_duration_max"
+	var min_value = point.get(min_property)
+	var max_value = point.get(max_property)
+	if (min_value is float or min_value is int) and (max_value is float or max_value is int):
+		return randf_range(float(min_value), float(max_value))
+	return randf_range(fallback_min, fallback_max)
+
+func _build_body() -> void:
+	if get_node_or_null("CollisionShape2D"):
+		return
+	var collision = CollisionShape2D.new()
+	collision.name = "CollisionShape2D"
+	var capsule = CapsuleShape2D.new()
+	capsule.radius = 12.0
+	capsule.height = 52.0
+	collision.shape = capsule
+	collision.position = Vector2(0, -22)
+	add_child(collision)
+
+func _build_debug_label() -> void:
+	_debug_label = Label.new()
+	_debug_label.name = "DebugAILabel"
+	_debug_label.position = Vector2(-86, -96)
+	_debug_label.size = Vector2(172, 58)
+	_debug_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_debug_label.add_theme_color_override("font_color", Color("#fff2b8"))
+	_debug_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
+	_debug_label.add_theme_constant_override("shadow_offset_x", 1)
+	_debug_label.add_theme_constant_override("shadow_offset_y", 1)
+	add_child(_debug_label)
+
+func _update_debug_label() -> void:
+	if not _debug_label:
+		return
+	_debug_label.visible = show_debug_ai
+	if not show_debug_ai:
+		return
+	var target_text = "none"
+	if has_investigation_position:
+		target_text = "%d,%d" % [int(current_investigation_position.x), int(current_investigation_position.y)]
+	_debug_label.text = "%s\nS:%03d VISIBLE:%s LOS:%s\nAIM:%s Ground:%s Target:%s" % [
+		_get_state_name(),
+		int(round(suspicion)),
+		"YES" if player_visible else "NO",
+		los_debug_state,
+		aim_source,
+		"YES" if ground_ahead else "NO",
+		target_text,
+	]
+
+func _get_state_name() -> String:
+	match state:
+		ScientistState.WORKING:
+			return "WORKING"
+		ScientistState.WANDERING:
+			return "WANDERING"
+		ScientistState.IDLE:
+			return "IDLE"
+		ScientistState.SUSPICIOUS:
+			return "SUSPICIOUS"
+		ScientistState.AIMING:
+			return "AIMING"
+		ScientistState.ATTACKING:
+			return "ATTACKING"
+	return "UNKNOWN"
+
+func _draw() -> void:
+	super()
+	var body_color = Color("#d7d6c9")
+	var coat_color = Color("#eef1e8")
+	var skin_color = Color("#e7c19d")
+	var alert_color = Color("#ff5a4f") if state == ScientistState.ATTACKING else Color("#ffc857")
+	draw_rect(Rect2(Vector2(-10, -50), Vector2(20, 42)), coat_color)
+	draw_rect(Rect2(Vector2(-13, -22), Vector2(26, 32)), body_color)
+	draw_circle(Vector2(0, -62), 10.0, skin_color)
+	draw_line(Vector2(-8, -14), Vector2(-22, 4), coat_color, 5.0)
+	draw_line(Vector2(8, -14), Vector2(22, 4), coat_color, 5.0)
+	draw_line(Vector2(-6, 8), Vector2(-8, 22), Color("#2f3540"), 5.0)
+	draw_line(Vector2(6, 8), Vector2(8, 22), Color("#2f3540"), 5.0)
+	draw_circle(Vector2(4 * facing_direction, -64), 2.0, Color.BLACK)
+	if state == ScientistState.AIMING or state == ScientistState.ATTACKING:
+		var gun_origin = Vector2(12 * facing_direction, -34)
+		var gun_direction = to_local(get_eye_position() + aim_direction.normalized() * 52.0) - to_local(get_eye_position())
+		draw_line(gun_origin, gun_origin + gun_direction.limit_length(34.0), Color("#202126"), 4.0)
+		draw_circle(gun_origin + gun_direction.limit_length(34.0), 2.5, alert_color)

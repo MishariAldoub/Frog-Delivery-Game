@@ -1,12 +1,18 @@
 extends Node2D
 
-@export var max_range = 360.0
+const HumanNoiseEvents = preload("res://scripts/ai/human_noise.gd")
+
+@export var max_range = 288.0
 @export var latch_radius = 44.0
 @export var spring_strength = 18.0
 @export var damping_force = 6.5
 @export var max_force = 3400.0
 @export var max_grabbed_angular_velocity = 8.0
 @export var grapple_collision_mask = 1
+@export var tongue_shot_noise_radius = 300.0
+@export var tongue_shot_noise_loudness = 0.45
+@export var grapple_impact_noise_radius = 520.0
+@export var grapple_impact_noise_loudness = 1.0
 
 var player
 var pizzas: Array[RigidBody2D] = []
@@ -15,6 +21,8 @@ var local_grab_point = Vector2.ZERO
 var aim_point = Vector2.ZERO
 var grapple_anchor = Vector2.ZERO
 var is_grappled_to_surface = false
+var grapple_pull_anchor = Vector2.ZERO
+var is_grapple_pulling_to_surface = false
 var suppressed_until_release = false
 
 func set_pizza_source(source: Array[RigidBody2D]) -> void:
@@ -30,6 +38,8 @@ func _physics_process(_delta: float) -> void:
 		_try_latch()
 	if Input.is_action_just_released("shoot_tongue"):
 		_release()
+	if Input.is_action_just_pressed("grapple_tongue"):
+		_try_grapple_pull()
 
 	if Input.is_action_pressed("shoot_tongue") and is_instance_valid(latched_pizza):
 		_pull_toward_mouse_target()
@@ -37,8 +47,11 @@ func _physics_process(_delta: float) -> void:
 	queue_redraw()
 
 func _try_latch() -> void:
+	if player and player.has_method("cancel_grapple_pull"):
+		player.cancel_grapple_pull()
 	_release()
 	var origin = player.get_tongue_origin_global()
+	HumanNoiseEvents.emit_noise(player, origin, tongue_shot_noise_loudness, tongue_shot_noise_radius, &"tongue_shot")
 	var cursor = get_global_mouse_position()
 	var clamped_target = origin + (cursor - origin).limit_length(max_range)
 
@@ -46,6 +59,7 @@ func _try_latch() -> void:
 	if not surface_hit.is_empty():
 		grapple_anchor = surface_hit["position"]
 		is_grappled_to_surface = true
+		HumanNoiseEvents.emit_noise(player, grapple_anchor, grapple_impact_noise_loudness, grapple_impact_noise_radius, &"tongue_impact")
 		if player and player.has_method("start_grapple"):
 			player.start_grapple(grapple_anchor, origin.distance_to(grapple_anchor))
 		return
@@ -67,6 +81,32 @@ func _try_latch() -> void:
 
 	if is_instance_valid(latched_pizza):
 		local_grab_point = _get_clamped_local_grab_point(latched_pizza, best_grab_world, origin)
+		HumanNoiseEvents.emit_noise(player, latched_pizza.global_position, grapple_impact_noise_loudness, grapple_impact_noise_radius, &"tongue_grab")
+
+func _try_grapple_pull() -> void:
+	var origin = player.get_tongue_origin_global()
+	var cursor = get_global_mouse_position()
+	var pull_range = _get_grapple_pull_range()
+	var clamped_target = origin + (cursor - origin).limit_length(pull_range)
+	var surface_hit = _get_grapple_surface_hit(origin, clamped_target)
+	if surface_hit.is_empty():
+		return
+	if not _is_wall_or_ceiling_hit(surface_hit):
+		return
+
+	var anchor = surface_hit["position"]
+	if origin.distance_to(anchor) > pull_range:
+		return
+	if not player or not player.has_method("start_grapple_pull"):
+		return
+	if not player.start_grapple_pull(anchor):
+		return
+
+	_release()
+	HumanNoiseEvents.emit_noise(player, anchor, grapple_impact_noise_loudness, grapple_impact_noise_radius, &"grapple_pull")
+	grapple_pull_anchor = anchor
+	is_grapple_pulling_to_surface = true
+	suppressed_until_release = false
 
 func _pull_toward_mouse_target() -> void:
 	var origin = player.get_tongue_origin_global()
@@ -131,6 +171,10 @@ func clear_grapple_without_player_release() -> void:
 	is_grappled_to_surface = false
 	suppressed_until_release = true
 
+func clear_grapple_pull_without_player_release() -> void:
+	grapple_pull_anchor = Vector2.ZERO
+	is_grapple_pulling_to_surface = false
+
 func _draw() -> void:
 	if not player:
 		return
@@ -138,7 +182,11 @@ func _draw() -> void:
 	var origin = to_local(player.get_tongue_origin_global())
 	var end = to_local(aim_point)
 	var color = Color("#ff6fa8")
-	if is_grappled_to_surface:
+	if is_grapple_pulling_to_surface:
+		draw_line(origin, to_local(grapple_pull_anchor), Color("#ffcc4d"), 7.0)
+		draw_circle(to_local(grapple_pull_anchor), 8.0, Color("#ffcc4d"))
+		return
+	elif is_grappled_to_surface:
 		draw_line(origin, to_local(grapple_anchor), Color("#ff397c"), 7.0)
 		draw_circle(to_local(grapple_anchor), 8.0, Color("#ff397c"))
 		return
@@ -177,14 +225,24 @@ func _get_grapple_surface_hit(origin: Vector2, target: Vector2) -> Dictionary:
 
 	return hit
 
+func _get_grapple_pull_range() -> float:
+	if player:
+		var configured_range = player.get("grapple_range")
+		if configured_range is float or configured_range is int:
+			return configured_range
+	return max_range
+
 func _classify_tongue_hit(hit: Dictionary) -> String:
 	var collider = hit.get("collider")
 	if collider == player:
 		return "OTHER"
-	if collider is StaticBody2D:
-		if collider.is_in_group("grapple_surface"):
-			return "GRAPPLE_SURFACE"
+	if collider is Node and collider.is_in_group("grapple_surface"):
+		return "GRAPPLE_SURFACE"
 	return "OTHER"
+
+func _is_wall_or_ceiling_hit(hit: Dictionary) -> bool:
+	var normal = hit.get("normal", Vector2.ZERO)
+	return abs(normal.x) > 0.65 or normal.y > 0.65
 
 func _get_player_exclusion_rids() -> Array[RID]:
 	var excluded: Array[RID] = []
