@@ -36,6 +36,8 @@ func _apply_orientation(player: Node) -> void:
 		"CEILING", "TAIL_HANG":
 			rotation = PI
 			scale.x = facing_direction
+		"CORNER_TRANSITION":
+			_apply_surface_normal_orientation(player, facing_direction)
 		_:
 			rotation = 0.0
 			scale.x = facing_direction
@@ -59,6 +61,9 @@ func _apply_animation(player: Node) -> void:
 			if abs(velocity.x) > 12.0:
 				animation = &"run"
 				speed_scale = 1.15 if _player_is_sprinting(player) else 0.85
+		"CORNER_TRANSITION":
+			animation = &"run"
+			speed_scale = 1.15
 		"GRAPPLING", "GRAPPLE_PULL":
 			animation = &"run" if velocity.length() > 90.0 else &"idle"
 			speed_scale = 1.2
@@ -81,6 +86,21 @@ func _get_player_state_name(player: Node) -> String:
 	if player.has_method("_get_state_name"):
 		return String(player._get_state_name()).split(" ")[0]
 	return ""
+
+func _apply_surface_normal_orientation(player: Node, facing_direction: int) -> void:
+	var normal = player.get("attached_surface_normal") as Vector2
+	if normal.y > 0.65:
+		rotation = PI
+		scale.x = facing_direction
+	elif normal.x > 0.65:
+		rotation = -PI * 0.5
+		scale.x = 1.0
+	elif normal.x < -0.65:
+		rotation = PI * 0.5
+		scale.x = 1.0
+	else:
+		rotation = 0.0
+		scale.x = facing_direction
 
 func _player_is_sprinting(player: Node) -> bool:
 	if player.has_method("_is_sprinting"):

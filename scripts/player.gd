@@ -13,6 +13,7 @@ enum PlayerState {
 	TAIL_HANG,
 	GRAPPLING,
 	GRAPPLE_PULL,
+	CORNER_TRANSITION,
 }
 
 @export_group("Movement")
@@ -40,12 +41,10 @@ enum PlayerState {
 @export var wall_sprint_speed = 270.0
 @export var ceiling_sprint_speed = 285.0
 @export var surface_adhesion_strength = 38.0
-@export var surface_corner_snap_distance = 34.0
 @export var surface_corner_carry_time = 0.16
 @export var surface_hold_probe_extra_distance = 18.0
 @export var surface_hold_probe_spread = 0.82
 @export var ground_corner_capture_distance = 22.0
-@export var wall_ceiling_corner_probe_distance = 48.0
 @export var airborne_ceiling_grab_extra_distance = 8.0
 @export var wall_capture_distance = 22.0
 @export var ceiling_capture_distance = 30.0
@@ -55,6 +54,16 @@ enum PlayerState {
 @export var ceiling_contact_grace_time = 0.16
 @export var ceiling_hold_check_distance = 10.0
 @export var surface_transition_lock_time = 0.10
+@export var corner_transition_duration = 0.055
+@export var corner_transition_probe_ahead = 18.0
+@export var corner_transition_probe_depth = 58.0
+@export var corner_transition_snap_speed = 1400.0
+@export var outer_corner_probe_distance = 22.0
+@export var outer_corner_snap_distance = 42.0
+@export var outer_corner_transition_time = 0.065
+@export var surface_loss_grace_time = 0.075
+@export var corner_input_grace_time = 0.13
+@export var airborne_ceiling_grab_min_up_speed = 80.0
 @export var wall_jump_horizontal_velocity = 360.0
 @export var wall_jump_vertical_velocity = -500.0
 @export var ceiling_detach_velocity = 260.0
@@ -112,7 +121,7 @@ const BODY_HALF_WIDTH = 18.0
 const BODY_HALF_HEIGHT = 28.0
 
 var state = PlayerState.AIRBORNE
-var attached_normal = Vector2.ZERO
+var attached_surface_normal = Vector2.ZERO
 var attached_contact_point = Vector2.ZERO
 var reattach_timer = 0.0
 var capture_rearm_timer = 0.0
@@ -122,6 +131,24 @@ var surface_transition_lock_timer = 0.0
 var coyote_timer = 0.0
 var surface_corner_carry_timer = 0.0
 var surface_corner_carry_velocity = Vector2.ZERO
+var surface_loss_grace_timer = 0.0
+var previous_surface_normal = Vector2.ZERO
+var corner_transition_timer = 0.0
+var corner_transition_from_normal = Vector2.ZERO
+var corner_transition_to_normal = Vector2.ZERO
+var corner_transition_contact_point = Vector2.ZERO
+var corner_transition_target_position = Vector2.ZERO
+var corner_transition_exit_velocity = Vector2.ZERO
+var corner_transition_destination_state = PlayerState.AIRBORNE
+var corner_transition_kind = "NONE"
+var corner_input_grace_timer = 0.0
+var last_corner_candidate_normal = Vector2.ZERO
+var last_corner_candidate_point = Vector2.ZERO
+var last_corner_expected_normal = Vector2.ZERO
+var last_corner_edge_point = Vector2.ZERO
+var last_corner_probe_from = Vector2.ZERO
+var last_corner_probe_to = Vector2.ZERO
+var last_corner_probe_hit = false
 var facing_direction = 1
 var current_stamina = 100.0
 var stamina_regen_timer = 0.0
@@ -170,6 +197,8 @@ func _physics_process(delta: float) -> void:
 	surface_transition_lock_timer = max(surface_transition_lock_timer - delta, 0.0)
 	coyote_timer = max(coyote_timer - delta, 0.0)
 	surface_corner_carry_timer = max(surface_corner_carry_timer - delta, 0.0)
+	surface_loss_grace_timer = max(surface_loss_grace_timer - delta, 0.0)
+	corner_input_grace_timer = max(corner_input_grace_timer - delta, 0.0)
 	tail_catch_visual_timer = max(tail_catch_visual_timer - delta, 0.0)
 	sprint_noise_timer = max(sprint_noise_timer - delta, 0.0)
 	_update_stamina(delta)
@@ -179,6 +208,8 @@ func _physics_process(delta: float) -> void:
 			_update_grapple_motion(delta)
 		PlayerState.GRAPPLE_PULL:
 			_update_grapple_pull_motion(delta)
+		PlayerState.CORNER_TRANSITION:
+			_update_corner_transition(delta)
 		PlayerState.TAIL_HANG:
 			_update_tail_hang(delta)
 		PlayerState.WALL_LEFT, PlayerState.WALL_RIGHT, PlayerState.CEILING:
@@ -203,17 +234,18 @@ func set_movement_state(new_state, surface_normal = Vector2.ZERO, contact_point 
 	if new_state != PlayerState.GRAPPLE_PULL:
 		is_grapple_pulling = false
 
-	if not _is_surface_state(new_state):
-		attached_normal = Vector2.ZERO
+	if not _is_surface_state(new_state) and new_state != PlayerState.CORNER_TRANSITION:
+		attached_surface_normal = Vector2.ZERO
 		attached_contact_point = Vector2.ZERO
 
 	state = new_state
 
 	if _is_surface_state(state):
-		attached_normal = _cardinalize_surface_normal(surface_normal)
+		previous_surface_normal = attached_surface_normal
+		attached_surface_normal = _cardinalize_surface_normal(surface_normal)
 		attached_contact_point = contact_point
 		if attached_contact_point == Vector2.ZERO:
-			attached_contact_point = global_position + attached_normal * tail_min_length
+			attached_contact_point = global_position + attached_surface_normal * tail_min_length
 		is_grappling = false
 		if state == PlayerState.CEILING:
 			ceiling_contact_grace_timer = ceiling_contact_grace_time
@@ -221,13 +253,13 @@ func set_movement_state(new_state, surface_normal = Vector2.ZERO, contact_point 
 			ceiling_contact_grace_timer = 0.0
 
 	if state == PlayerState.GRAPPLING:
-		attached_normal = Vector2.ZERO
+		attached_surface_normal = Vector2.ZERO
 		attached_contact_point = Vector2.ZERO
 		is_grappling = true
 		ceiling_contact_grace_timer = 0.0
 
 	if state == PlayerState.GRAPPLE_PULL:
-		attached_normal = Vector2.ZERO
+		attached_surface_normal = Vector2.ZERO
 		attached_contact_point = Vector2.ZERO
 		is_grapple_pulling = true
 		ceiling_contact_grace_timer = 0.0
@@ -238,7 +270,7 @@ func set_movement_state(new_state, surface_normal = Vector2.ZERO, contact_point 
 	if _is_surface_state(previous_state) and _is_surface_state(state) and previous_state != state:
 		surface_transition_lock_timer = surface_transition_lock_time
 
-	if state == PlayerState.GRAPPLING or state == PlayerState.GRAPPLE_PULL or state == PlayerState.TAIL_HANG or _is_surface_state(state):
+	if state == PlayerState.GRAPPLING or state == PlayerState.GRAPPLE_PULL or state == PlayerState.TAIL_HANG or state == PlayerState.CORNER_TRANSITION or _is_surface_state(state):
 		coyote_timer = 0.0
 
 	_update_debug_state_label()
@@ -272,6 +304,8 @@ func _update_platformer_motion(delta: float) -> void:
 	move_and_slide()
 	if _try_ground_to_wall_corner_transition(input_axis):
 		return
+	if _try_ground_to_outer_corner_transition(input_axis):
+		return
 	if _try_surface_capture_assist(delta):
 		return
 	_try_attach_from_contacts()
@@ -291,7 +325,7 @@ func _update_surface_crawl(delta: float) -> void:
 	var along_input = _get_surface_input()
 	if is_zero_approx(along_input) and surface_corner_carry_timer > 0.0:
 		along_input = surface_corner_carry_velocity.dot(along_surface)
-	var adhesion = -attached_normal * surface_adhesion_strength
+	var adhesion = -attached_surface_normal * surface_adhesion_strength
 	velocity = along_surface * along_input + adhesion
 
 	if state == PlayerState.CEILING and not is_zero_approx(along_input):
@@ -301,16 +335,26 @@ func _update_surface_crawl(delta: float) -> void:
 		move_and_slide()
 		_hold_attached_surface(delta)
 		return
+	if _try_outer_surface_corner_transition(previous_state):
+		move_and_slide()
+		return
 
 	move_and_slide()
 
 	if _try_surface_corner_transition(previous_state, delta):
+		return
+	if _try_outer_surface_corner_transition(previous_state):
 		return
 
 	if not _refresh_attached_contact():
 		if capture_commit_timer > 0.0 and _confirm_committed_surface():
 			return
 		if _hold_attached_surface(delta):
+			return
+		if _try_outer_surface_corner_transition(previous_state):
+			return
+		if surface_loss_grace_timer > 0.0:
+			velocity = _get_surface_attach_velocity(attached_surface_normal)
 			return
 		if previous_state == PlayerState.CEILING:
 			print("CEILING EXIT: SURFACE_LOST")
@@ -399,44 +443,217 @@ func _update_grapple_pull_motion(delta: float) -> void:
 func _try_surface_corner_transition(previous_state, _delta: float) -> bool:
 	if surface_transition_lock_timer > 0.0:
 		return false
+	if attached_surface_normal == Vector2.ZERO:
+		return false
 
-	match previous_state:
-		PlayerState.WALL_LEFT, PlayerState.WALL_RIGHT:
-			if _wants_wall_to_floor_transition():
-				var floor_hit = _find_floor_for_wall_corner(previous_state)
-				if not floor_hit.is_empty():
-					var wall_to_floor_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
-					var floor_speed = sprint_move_speed if wall_to_floor_sprint else normal_move_speed
-					var floor_direction = 1.0 if previous_state == PlayerState.WALL_LEFT else -1.0
-					set_movement_state(PlayerState.GROUNDED)
-					velocity = Vector2(floor_direction * floor_speed, surface_adhesion_strength)
-					capture_commit_timer = surface_capture_commit_time
-					surface_transition_lock_timer = surface_transition_lock_time
-					_set_surface_corner_carry(velocity)
-					print("SURFACE TRANSITION: ", _get_state_label(previous_state), " -> GROUNDED")
-					return true
-			return _try_wall_to_ceiling_corner_transition(previous_state)
-		PlayerState.CEILING:
-			var horizontal_input = _get_horizontal_input()
-			if not _wants_ceiling_to_wall_transition(horizontal_input):
-				return false
-			var wall_hit = _find_wall_for_ceiling_corner(horizontal_input)
-			if wall_hit.is_empty():
-				return false
-			var target_state = _state_from_normal(wall_hit["normal"])
-			if not _is_intended_ceiling_wall_state(horizontal_input, target_state):
-				return false
-			var ceiling_to_wall_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
-			var wall_speed = wall_sprint_speed if ceiling_to_wall_sprint else wall_crawl_speed
-			_align_to_captured_surface(wall_hit)
-			set_movement_state(target_state, wall_hit["normal"], wall_hit["position"])
-			velocity = Vector2(-attached_normal.x * surface_adhesion_strength, wall_speed)
-			capture_commit_timer = surface_capture_commit_time
-			surface_transition_lock_timer = surface_transition_lock_time
-			_set_surface_corner_carry(velocity)
-			print("SURFACE TRANSITION: CEILING -> ", _get_state_label(target_state))
-			return true
-	return false
+	var tangent = _get_surface_tangent()
+	var along_input = _get_surface_input()
+	if is_zero_approx(along_input) and surface_corner_carry_timer > 0.0:
+		along_input = surface_corner_carry_velocity.dot(tangent)
+	if is_zero_approx(along_input):
+		_clear_corner_debug()
+		return false
+
+	var move_direction = tangent * sign(along_input)
+	var destination_normal = _cardinalize_surface_normal(-move_direction)
+	if destination_normal == Vector2.ZERO or abs(destination_normal.dot(attached_surface_normal)) > 0.05:
+		_clear_corner_debug()
+		return false
+
+	var current_ahead_hit = _find_surface_hold_hit_at(
+		attached_surface_normal,
+		global_position + move_direction * (_get_surface_tangent_radius(attached_surface_normal) + corner_transition_probe_ahead)
+	)
+	_clear_corner_debug()
+	var destination_hit = _find_corner_destination_surface(attached_surface_normal, destination_normal, move_direction)
+	if destination_hit.is_empty():
+		return false
+	if not current_ahead_hit.is_empty() and global_position.distance_to(destination_hit["position"]) > corner_transition_probe_depth:
+		return false
+
+	_start_corner_transition(previous_state, destination_hit, move_direction, Vector2.ZERO, "INNER_CORNER")
+	return true
+
+func _try_outer_surface_corner_transition(previous_state) -> bool:
+	if surface_transition_lock_timer > 0.0:
+		return false
+	if attached_surface_normal == Vector2.ZERO:
+		return false
+
+	var tangent = _get_surface_tangent()
+	var along_input = _get_surface_input()
+	if is_zero_approx(along_input) and surface_corner_carry_timer > 0.0:
+		along_input = surface_corner_carry_velocity.dot(tangent)
+	if is_zero_approx(along_input):
+		return false
+
+	var move_direction = tangent * sign(along_input)
+	var current_ahead_hit = _find_surface_hold_hit_at(
+		attached_surface_normal,
+		global_position + move_direction * (_get_surface_tangent_radius(attached_surface_normal) + corner_transition_probe_ahead)
+	)
+	if not current_ahead_hit.is_empty():
+		return false
+
+	var destination_normal = _cardinalize_surface_normal(move_direction)
+	var destination_hit = _find_outer_corner_destination_surface(attached_surface_normal, destination_normal, move_direction)
+	if destination_hit.is_empty():
+		return false
+
+	_start_corner_transition(previous_state, destination_hit, move_direction, Vector2.ZERO, "OUTER_CORNER")
+	return true
+
+func _start_corner_transition(previous_state, destination_hit: Dictionary, move_direction: Vector2, from_normal_override: Vector2 = Vector2.ZERO, transition_kind: String = "INNER_CORNER") -> void:
+	var destination_normal = _cardinalize_surface_normal(destination_hit["normal"])
+	var destination_state = _state_from_normal(destination_normal)
+	var speed = _get_crawl_speed_for_normal(destination_normal)
+	if destination_state == PlayerState.GROUNDED:
+		speed = sprint_move_speed if Input.is_action_pressed("sprint") and current_stamina > 0.0 else normal_move_speed
+
+	corner_transition_from_normal = _cardinalize_surface_normal(from_normal_override) if from_normal_override != Vector2.ZERO else attached_surface_normal
+	corner_transition_to_normal = destination_normal
+	corner_transition_contact_point = destination_hit["position"]
+	corner_transition_destination_state = destination_state
+	corner_transition_target_position = _get_aligned_position_for_surface(destination_hit)
+	corner_transition_kind = transition_kind
+	corner_transition_timer = outer_corner_transition_time if transition_kind == "OUTER_CORNER" else corner_transition_duration
+	corner_input_grace_timer = corner_input_grace_time
+	previous_surface_normal = corner_transition_from_normal
+	attached_surface_normal = destination_normal
+	attached_contact_point = destination_hit["position"]
+	velocity = move_direction * max(abs(_get_surface_input()), speed * 0.75)
+	var destination_tangent = _get_tangent_for_normal(destination_normal)
+	var exit_sign = sign(corner_transition_from_normal.dot(destination_tangent))
+	if is_zero_approx(exit_sign):
+		exit_sign = sign(velocity.dot(destination_tangent))
+	if is_zero_approx(exit_sign):
+		exit_sign = 1.0
+	corner_transition_exit_velocity = destination_tangent * exit_sign * speed - destination_normal * surface_adhesion_strength
+	if destination_state == PlayerState.GROUNDED:
+		corner_transition_exit_velocity = destination_tangent * exit_sign * speed + Vector2.DOWN * surface_adhesion_strength
+	set_movement_state(PlayerState.CORNER_TRANSITION)
+	print("SURFACE TRANSITION: ", _get_state_label(previous_state), " -> ", _get_state_label(destination_state), " via ", transition_kind)
+
+func _update_corner_transition(delta: float) -> void:
+	if corner_transition_timer <= 0.0:
+		_finish_corner_transition()
+		return
+
+	corner_transition_timer = max(corner_transition_timer - delta, 0.0)
+	var to_target = corner_transition_target_position - global_position
+	if to_target.length() > 0.5:
+		velocity = to_target.limit_length(corner_transition_snap_speed * delta) / max(delta, 0.001)
+	else:
+		velocity = Vector2.ZERO
+	move_and_slide()
+
+	var refreshed_hit = _find_surface_hold_hit(corner_transition_to_normal, corner_transition_probe_depth)
+	if not refreshed_hit.is_empty():
+		corner_transition_contact_point = refreshed_hit["position"]
+		attached_contact_point = refreshed_hit["position"]
+		corner_transition_target_position = _get_aligned_position_for_surface(refreshed_hit)
+
+	if corner_transition_timer <= 0.0 or global_position.distance_to(corner_transition_target_position) <= 1.0:
+		_finish_corner_transition()
+
+func _finish_corner_transition() -> void:
+	var destination_state = corner_transition_destination_state
+	var destination_normal = corner_transition_to_normal
+	var destination_contact = corner_transition_contact_point
+	var exit_velocity = corner_transition_exit_velocity
+
+	corner_transition_timer = 0.0
+	capture_commit_timer = surface_capture_commit_time
+	surface_transition_lock_timer = surface_transition_lock_time
+	_set_surface_corner_carry(exit_velocity)
+	set_movement_state(destination_state, destination_normal, destination_contact)
+	velocity = exit_velocity
+	if _is_surface_state(destination_state):
+		_hold_attached_surface(0.0)
+
+func _find_corner_destination_surface(from_normal: Vector2, destination_normal: Vector2, move_direction: Vector2) -> Dictionary:
+	var old_body_radius = _get_surface_body_radius(from_normal)
+	var old_tangent_radius = _get_surface_tangent_radius(from_normal)
+	var destination_body_radius = _get_surface_body_radius(destination_normal)
+	var search_distance = max(corner_transition_probe_depth, destination_body_radius + surface_attach_offset + surface_hold_probe_extra_distance)
+	var base = global_position + move_direction * (old_tangent_radius + corner_transition_probe_ahead)
+	var probes = [
+		base,
+		base + from_normal * old_body_radius * 0.55,
+		base - from_normal * old_body_radius * 0.35,
+		global_position + move_direction * old_tangent_radius,
+		global_position + move_direction * (old_tangent_radius + corner_transition_probe_ahead * 1.75) + from_normal * old_body_radius * 0.35,
+	]
+
+	var best_hit: Dictionary = {}
+	var best_distance := INF
+	for probe_origin in probes:
+		var probe_to = probe_origin - destination_normal * search_distance
+		last_corner_probe_from = probe_origin
+		last_corner_probe_to = probe_to
+		var hit = _raycast_level_surface(probe_origin, probe_to)
+		if hit.is_empty():
+			last_corner_probe_hit = false
+			continue
+		var hit_normal = _cardinalize_surface_normal(hit["normal"])
+		if hit_normal.dot(destination_normal) <= 0.72:
+			last_corner_probe_hit = false
+			continue
+		var distance = probe_origin.distance_to(hit["position"])
+		if distance < best_distance:
+			best_distance = distance
+			best_hit = hit
+			last_corner_probe_hit = true
+
+	if not best_hit.is_empty():
+		last_corner_candidate_normal = _cardinalize_surface_normal(best_hit["normal"])
+		last_corner_candidate_point = best_hit["position"]
+		last_corner_probe_hit = true
+	return best_hit
+
+func _find_outer_corner_destination_surface(from_normal: Vector2, destination_normal: Vector2, move_direction: Vector2) -> Dictionary:
+	var old_body_radius = _get_surface_body_radius(from_normal)
+	var old_tangent_radius = _get_surface_tangent_radius(from_normal)
+	var destination_body_radius = _get_surface_body_radius(destination_normal)
+	var search_distance = max(outer_corner_snap_distance, destination_body_radius + surface_attach_offset + outer_corner_probe_distance)
+	var edge_point = global_position + move_direction * (old_tangent_radius + corner_transition_probe_ahead)
+	last_corner_edge_point = edge_point
+	last_corner_expected_normal = destination_normal
+
+	var probe_start = edge_point + destination_normal * (destination_body_radius + outer_corner_probe_distance)
+	var probes = [
+		probe_start,
+		probe_start - from_normal * old_body_radius * 0.65,
+		probe_start - from_normal * old_body_radius * 1.15,
+		probe_start + from_normal * old_body_radius * 0.25,
+		edge_point + destination_normal * (destination_body_radius + outer_corner_probe_distance * 0.45) - from_normal * old_body_radius * 0.9,
+	]
+
+	var best_hit: Dictionary = {}
+	var best_distance := INF
+	for probe_origin in probes:
+		var probe_to = probe_origin - destination_normal * search_distance
+		last_corner_probe_from = probe_origin
+		last_corner_probe_to = probe_to
+		var hit = _raycast_level_surface(probe_origin, probe_to)
+		if hit.is_empty():
+			last_corner_probe_hit = false
+			continue
+		var hit_normal = _cardinalize_surface_normal(hit["normal"])
+		if hit_normal.dot(destination_normal) <= 0.72:
+			last_corner_probe_hit = false
+			continue
+		var distance = probe_origin.distance_to(hit["position"])
+		if distance < best_distance:
+			best_distance = distance
+			best_hit = hit
+			last_corner_probe_hit = true
+
+	if not best_hit.is_empty():
+		last_corner_candidate_normal = _cardinalize_surface_normal(best_hit["normal"])
+		last_corner_candidate_point = best_hit["position"]
+		last_corner_probe_hit = true
+	return best_hit
 
 func _try_ground_to_wall_corner_transition(horizontal_input: float) -> bool:
 	if surface_transition_lock_timer > 0.0:
@@ -449,62 +666,31 @@ func _try_ground_to_wall_corner_transition(horizontal_input: float) -> bool:
 	var target_state = _state_from_normal(wall_hit["normal"])
 	if not _is_surface_state(target_state):
 		return false
-	_align_to_captured_surface(wall_hit)
-	set_movement_state(target_state, wall_hit["normal"], wall_hit["position"])
-	var ground_to_wall_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
-	var wall_speed = wall_sprint_speed if ground_to_wall_sprint else wall_crawl_speed
-	velocity = -attached_normal * surface_adhesion_strength + Vector2.UP * wall_speed
-	capture_commit_timer = surface_capture_commit_time
-	surface_transition_lock_timer = surface_transition_lock_time
-	_set_surface_corner_carry(velocity)
-	print("SURFACE TRANSITION: GROUNDED -> ", _get_state_label(target_state))
+	_start_corner_transition(PlayerState.GROUNDED, wall_hit, Vector2.RIGHT * sign(horizontal_input), Vector2.UP, "INNER_CORNER")
 	return true
 
-func _try_wall_to_ceiling_corner_transition(wall_state) -> bool:
+func _try_ground_to_outer_corner_transition(horizontal_input: float) -> bool:
 	if surface_transition_lock_timer > 0.0:
 		return false
-	if wall_state != PlayerState.WALL_LEFT and wall_state != PlayerState.WALL_RIGHT:
+	if not is_on_floor() or is_zero_approx(horizontal_input):
 		return false
-	if not _wants_wall_to_ceiling_transition():
+
+	var move_direction = Vector2.RIGHT * sign(horizontal_input)
+	var floor_ahead_origin = global_position + move_direction * (BODY_HALF_WIDTH + corner_transition_probe_ahead)
+	var floor_ahead_hit = _find_surface_hold_hit_at(Vector2.UP, floor_ahead_origin)
+	if not floor_ahead_hit.is_empty():
 		return false
-	var ceiling_hit = _find_ceiling_for_wall_corner(wall_state)
-	if ceiling_hit.is_empty():
+
+	_clear_corner_debug()
+	var destination_normal = _cardinalize_surface_normal(move_direction)
+	var destination_hit = _find_outer_corner_destination_surface(Vector2.UP, destination_normal, move_direction)
+	if destination_hit.is_empty():
 		return false
-	_align_to_captured_surface(ceiling_hit)
-	var wall_to_ceiling_sprint = Input.is_action_pressed("sprint") and current_stamina > 0.0
-	var ceiling_speed = ceiling_sprint_speed if wall_to_ceiling_sprint else ceiling_crawl_speed
-	set_movement_state(PlayerState.CEILING, ceiling_hit["normal"], ceiling_hit["position"])
-	var ceiling_direction = _get_ceiling_corner_exit_direction(wall_state)
-	velocity = Vector2(ceiling_direction * ceiling_speed, -surface_adhesion_strength)
-	capture_commit_timer = surface_capture_commit_time
-	ceiling_contact_grace_timer = ceiling_contact_grace_time
-	surface_transition_lock_timer = surface_transition_lock_time
-	_set_surface_corner_carry(velocity)
-	print("SURFACE TRANSITION: ", _get_state_label(wall_state), " -> CEILING")
+	if not _is_surface_state(_state_from_normal(destination_hit["normal"])):
+		return false
+
+	_start_corner_transition(PlayerState.GROUNDED, destination_hit, move_direction, Vector2.UP, "OUTER_CORNER")
 	return true
-
-func _wants_wall_to_ceiling_transition() -> bool:
-	if _get_vertical_crawl_input() <= 0.0:
-		return false
-	return velocity.dot(Vector2.UP) >= -20.0
-
-func _wants_wall_to_floor_transition() -> bool:
-	if _get_vertical_crawl_input() >= 0.0:
-		return false
-	return velocity.dot(Vector2.DOWN) >= -20.0
-
-func _wants_ceiling_to_wall_transition(horizontal_input: float) -> bool:
-	if is_zero_approx(horizontal_input):
-		return false
-	var intended_direction = Vector2.RIGHT * sign(horizontal_input)
-	return velocity.dot(intended_direction) >= -20.0
-
-func _is_intended_ceiling_wall_state(horizontal_input: float, target_state) -> bool:
-	if horizontal_input > 0.0:
-		return target_state == PlayerState.WALL_RIGHT
-	if horizontal_input < 0.0:
-		return target_state == PlayerState.WALL_LEFT
-	return false
 
 func _get_state_label(check_state) -> String:
 	match check_state:
@@ -524,6 +710,8 @@ func _get_state_label(check_state) -> String:
 			return "GRAPPLING"
 		PlayerState.GRAPPLE_PULL:
 			return "GRAPPLE_PULL"
+		PlayerState.CORNER_TRANSITION:
+			return "CORNER_TRANSITION"
 	return "UNKNOWN"
 
 func _set_surface_corner_carry(carry_velocity: Vector2) -> void:
@@ -531,7 +719,12 @@ func _set_surface_corner_carry(carry_velocity: Vector2) -> void:
 	surface_corner_carry_timer = surface_corner_carry_time
 
 func _try_surface_capture_assist(delta: float) -> bool:
-	if capture_rearm_timer > 0.0 or reattach_timer > 0.0:
+	var ceiling_grab_exception = (
+		state == PlayerState.AIRBORNE
+		and reattach_timer > 0.0
+		and velocity.y < -airborne_ceiling_grab_min_up_speed
+	)
+	if capture_rearm_timer > 0.0 or (reattach_timer > 0.0 and not ceiling_grab_exception):
 		return false
 	if state != PlayerState.AIRBORNE and state != PlayerState.GRAPPLING and state != PlayerState.GRAPPLE_PULL:
 		return false
@@ -539,6 +732,8 @@ func _try_surface_capture_assist(delta: float) -> bool:
 		return false
 
 	var capture_hit = _get_capture_contact_from_slides()
+	if ceiling_grab_exception and not capture_hit.is_empty() and _state_from_normal(capture_hit["normal"]) != PlayerState.CEILING:
+		capture_hit = {}
 	if capture_hit.is_empty():
 		capture_hit = _find_surface_capture_hit()
 	if capture_hit.is_empty():
@@ -548,8 +743,11 @@ func _try_surface_capture_assist(delta: float) -> bool:
 	var target_state = _state_from_normal(normal)
 	if not _is_surface_state(target_state):
 		return false
+	if ceiling_grab_exception and target_state != PlayerState.CEILING:
+		return false
 
-	_show_tail_catch_visual(capture_hit["position"])
+	if target_state != PlayerState.CEILING:
+		_show_tail_catch_visual(capture_hit["position"])
 	HumanNoiseEvents.emit_noise(self, capture_hit["position"], grapple_pull_noise_loudness, grapple_pull_noise_radius, &"surface_attach")
 	_align_to_captured_surface(capture_hit)
 	set_movement_state(target_state, normal, capture_hit["position"])
@@ -614,31 +812,41 @@ func _is_moving_toward_surface(surface_normal: Vector2) -> bool:
 
 func _align_to_captured_surface(hit: Dictionary) -> void:
 	var normal = _cardinalize_surface_normal(hit["normal"])
-	var hit_position = hit["position"]
-	var body_radius = _get_surface_body_radius(normal)
-	var desired_position = hit_position + normal * (body_radius + surface_attach_offset)
+	var desired_position = _get_aligned_position_for_surface(hit)
 	var offset = normal * (desired_position - global_position).dot(normal)
 	var max_snap = max(wall_capture_distance, ceiling_capture_distance) + surface_attach_offset + 2.0
 	if abs(offset.dot(normal)) <= max_snap:
 		global_position += offset
+
+func _get_aligned_position_for_surface(hit: Dictionary) -> Vector2:
+	var normal = _cardinalize_surface_normal(hit["normal"])
+	var hit_position = hit["position"]
+	var body_radius = _get_surface_body_radius(normal)
+	return hit_position + normal * (body_radius + surface_attach_offset)
 
 func _get_surface_body_radius(normal: Vector2) -> float:
 	if abs(normal.x) > abs(normal.y):
 		return BODY_HALF_WIDTH
 	return BODY_HALF_HEIGHT
 
+func _get_surface_tangent_radius(normal: Vector2) -> float:
+	if abs(normal.x) > abs(normal.y):
+		return BODY_HALF_HEIGHT
+	return BODY_HALF_WIDTH
+
 func _confirm_committed_surface() -> bool:
 	var probe_distance = surface_attach_offset + 5.0
 	var probe_from = global_position
-	var probe_to = global_position - attached_normal * (_get_surface_body_radius(attached_normal) + probe_distance)
+	var probe_to = global_position - attached_surface_normal * (_get_surface_body_radius(attached_surface_normal) + probe_distance)
 	var hit = _raycast_level_surface(probe_from, probe_to)
 	if hit.is_empty():
 		return false
 	var normal = hit["normal"]
-	if normal.dot(attached_normal) <= 0.72:
+	if normal.dot(attached_surface_normal) <= 0.72:
 		return false
 	attached_contact_point = hit["position"]
 	_align_to_captured_surface(hit)
+	surface_loss_grace_timer = surface_loss_grace_time
 	if state == PlayerState.CEILING:
 		ceiling_contact_grace_timer = ceiling_contact_grace_time
 	return true
@@ -651,15 +859,16 @@ func _hold_attached_surface(delta: float) -> bool:
 	if hit.is_empty():
 		return false
 
-	attached_normal = _cardinalize_surface_normal(hit["normal"])
+	attached_surface_normal = _cardinalize_surface_normal(hit["normal"])
 	attached_contact_point = hit["position"]
 	_align_to_captured_surface(hit)
+	surface_loss_grace_timer = surface_loss_grace_time
 	return true
 
 func _find_attached_surface_hold_hit() -> Dictionary:
 	if state != PlayerState.WALL_LEFT and state != PlayerState.WALL_RIGHT:
 		return {}
-	var normal = attached_normal
+	var normal = attached_surface_normal
 	if normal == Vector2.ZERO:
 		return {}
 	return _find_surface_hold_hit(normal)
@@ -667,11 +876,12 @@ func _find_attached_surface_hold_hit() -> Dictionary:
 func _hold_ceiling_contact(delta: float) -> bool:
 	var hit = _find_ceiling_hold_hit()
 	if not hit.is_empty():
-		attached_normal = _cardinalize_surface_normal(hit["normal"])
+		attached_surface_normal = _cardinalize_surface_normal(hit["normal"])
 		attached_contact_point = hit["position"]
 		ceiling_contact_grace_timer = ceiling_contact_grace_time
 		_align_to_captured_surface(hit)
 		_remove_ceiling_outward_velocity()
+		surface_loss_grace_timer = surface_loss_grace_time
 		return true
 
 	ceiling_contact_grace_timer = max(ceiling_contact_grace_timer - delta, 0.0)
@@ -681,7 +891,7 @@ func _hold_ceiling_contact(delta: float) -> bool:
 	return false
 
 func _find_ceiling_hold_hit() -> Dictionary:
-	var normal = attached_normal
+	var normal = attached_surface_normal
 	if normal == Vector2.ZERO:
 		normal = Vector2.DOWN
 	return _find_surface_hold_hit(normal, ceiling_hold_check_distance)
@@ -705,14 +915,27 @@ func _find_surface_hold_hit(normal: Vector2, extra_distance: float = -1.0) -> Di
 		-tangent * spread * 0.5,
 	]
 	for probe_offset in probe_offsets:
-		var probe_from = global_position + probe_offset
-		var probe_to = probe_from - cardinal_normal * probe_distance
-		var hit = _raycast_level_surface(probe_from, probe_to)
+		var hit = _find_surface_hold_hit_at(cardinal_normal, global_position + probe_offset, probe_distance)
 		if hit.is_empty():
 			continue
-		var hit_normal = _cardinalize_surface_normal(hit["normal"])
-		if hit_normal.dot(cardinal_normal) > 0.72:
-			return hit
+		return hit
+	return {}
+
+func _find_surface_hold_hit_at(normal: Vector2, probe_from: Vector2, probe_distance: float = -1.0) -> Dictionary:
+	var cardinal_normal = _cardinalize_surface_normal(normal)
+	if cardinal_normal == Vector2.ZERO:
+		return {}
+	var body_radius = _get_surface_body_radius(cardinal_normal)
+	var distance = probe_distance
+	if distance < 0.0:
+		distance = body_radius + surface_attach_offset + surface_hold_probe_extra_distance
+	var probe_to = probe_from - cardinal_normal * distance
+	var hit = _raycast_level_surface(probe_from, probe_to)
+	if hit.is_empty():
+		return {}
+	var hit_normal = _cardinalize_surface_normal(hit["normal"])
+	if hit_normal.dot(cardinal_normal) > 0.72:
+		return hit
 	return {}
 
 func _get_surface_attach_velocity(surface_normal: Vector2) -> Vector2:
@@ -722,10 +945,28 @@ func _get_surface_attach_velocity(surface_normal: Vector2) -> Vector2:
 	var adhesion = -normal * surface_adhesion_strength
 	return tangent_component + adhesion
 
+func _get_crawl_speed_for_normal(surface_normal: Vector2) -> float:
+	var normal = _cardinalize_surface_normal(surface_normal)
+	var sprinting = Input.is_action_pressed("sprint") and current_stamina > 0.0
+	if abs(normal.x) > abs(normal.y):
+		return wall_sprint_speed if sprinting else wall_crawl_speed
+	if normal == Vector2.DOWN:
+		return ceiling_sprint_speed if sprinting else ceiling_crawl_speed
+	return sprint_move_speed if sprinting else normal_move_speed
+
+func _clear_corner_debug() -> void:
+	last_corner_candidate_normal = Vector2.ZERO
+	last_corner_candidate_point = Vector2.ZERO
+	last_corner_expected_normal = Vector2.ZERO
+	last_corner_edge_point = Vector2.ZERO
+	last_corner_probe_from = Vector2.ZERO
+	last_corner_probe_to = Vector2.ZERO
+	last_corner_probe_hit = false
+
 func _remove_ceiling_outward_velocity() -> void:
 	if state != PlayerState.CEILING:
 		return
-	var normal = attached_normal
+	var normal = attached_surface_normal
 	if normal == Vector2.ZERO:
 		normal = Vector2.DOWN
 	var outward_speed = velocity.dot(normal)
@@ -750,35 +991,6 @@ func _clear_tongue_grapple_pull_for_surface_attach() -> void:
 	if tongue and tongue.has_method("clear_grapple_pull_without_player_release"):
 		tongue.clear_grapple_pull_without_player_release()
 
-func _find_ceiling_for_wall_corner(wall_state) -> Dictionary:
-	var exit_direction = _get_ceiling_corner_exit_direction(wall_state)
-	var search_distance = max(wall_ceiling_corner_probe_distance, ceiling_capture_distance)
-	var side = Vector2.RIGHT * exit_direction
-	var probes = [
-		global_position + Vector2(0.0, -BODY_HALF_HEIGHT),
-		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 0.35, -BODY_HALF_HEIGHT),
-		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 0.85, -BODY_HALF_HEIGHT),
-		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 1.25, -BODY_HALF_HEIGHT),
-		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 1.25, -BODY_HALF_HEIGHT * 0.45),
-		global_position + Vector2(exit_direction * BODY_HALF_WIDTH * 0.35, -BODY_HALF_HEIGHT * 0.72),
-		global_position + Vector2(-exit_direction * BODY_HALF_WIDTH * 0.25, -BODY_HALF_HEIGHT * 0.72),
-	]
-
-	for probe_origin in probes:
-		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.UP * search_distance)
-		if _is_ceiling_hit(hit):
-			return hit
-		hit = _raycast_level_surface(probe_origin, probe_origin + (Vector2.UP + side).normalized() * search_distance)
-		if _is_ceiling_hit(hit):
-			return hit
-
-	for index in range(get_slide_collision_count()):
-		var collision = get_slide_collision(index)
-		var normal = collision.get_normal()
-		if normal.y > CEILING_NORMAL_THRESHOLD:
-			return {"normal": normal, "position": collision.get_position()}
-	return {}
-
 func _find_ceiling_in_reach(distance: float) -> Dictionary:
 	var probes = [
 		global_position + Vector2(0.0, -BODY_HALF_HEIGHT),
@@ -791,34 +1003,6 @@ func _find_ceiling_in_reach(distance: float) -> Dictionary:
 		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.UP * distance)
 		if _is_ceiling_hit(hit):
 			return hit
-	return {}
-
-func _get_ceiling_corner_exit_direction(wall_state) -> float:
-	return 1.0 if wall_state == PlayerState.WALL_LEFT else -1.0
-
-func _find_wall_for_ceiling_corner(horizontal_input: float) -> Dictionary:
-	var direction = sign(horizontal_input)
-	var hit = _find_wall_in_direction(direction, surface_corner_snap_distance)
-	if not hit.is_empty():
-		return hit
-	var side = 1.0 if direction > 0.0 else -1.0
-	var search_distance = max(surface_corner_snap_distance, wall_capture_distance + BODY_HALF_WIDTH)
-	var probes = [
-		global_position + Vector2(side * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT),
-		global_position + Vector2(side * BODY_HALF_WIDTH, -BODY_HALF_HEIGHT * 0.55),
-		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, -BODY_HALF_HEIGHT),
-		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, 0.0),
-	]
-	for probe_origin in probes:
-		hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.RIGHT * side * search_distance)
-		if _is_wall_hit(hit):
-			return hit
-
-	for index in range(get_slide_collision_count()):
-		var collision = get_slide_collision(index)
-		var normal = collision.get_normal()
-		if abs(normal.x) > WALL_NORMAL_THRESHOLD:
-			return {"normal": normal, "position": collision.get_position()}
 	return {}
 
 func _find_wall_in_direction(direction: float, distance: float) -> Dictionary:
@@ -838,26 +1022,6 @@ func _find_wall_in_direction(direction: float, distance: float) -> Dictionary:
 		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.RIGHT * side * search_distance)
 		if _is_wall_hit(hit):
 			return hit
-	return {}
-
-func _find_floor_for_wall_corner(wall_state) -> Dictionary:
-	var side = -1.0 if wall_state == PlayerState.WALL_RIGHT else 1.0
-	var probes = [
-		global_position + Vector2(0.0, BODY_HALF_HEIGHT),
-		global_position + Vector2(side * BODY_HALF_WIDTH * 0.65, BODY_HALF_HEIGHT),
-		global_position + Vector2(side * BODY_HALF_WIDTH, BODY_HALF_HEIGHT * 0.5),
-		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, BODY_HALF_HEIGHT),
-		global_position + Vector2(side * BODY_HALF_WIDTH * 1.2, BODY_HALF_HEIGHT * 0.25),
-	]
-	for probe_origin in probes:
-		var hit = _raycast_level_surface(probe_origin, probe_origin + Vector2.DOWN * surface_corner_snap_distance)
-		if _is_floor_hit(hit):
-			return hit
-	for index in range(get_slide_collision_count()):
-		var collision = get_slide_collision(index)
-		var normal = collision.get_normal()
-		if _is_floor_normal(normal):
-			return {"normal": normal, "position": collision.get_position()}
 	return {}
 
 func _raycast_level_surface(from: Vector2, to: Vector2) -> Dictionary:
@@ -887,11 +1051,6 @@ func _is_wall_hit(hit: Dictionary) -> bool:
 	var normal = hit.get("normal", Vector2.ZERO)
 	return abs(normal.x) > WALL_NORMAL_THRESHOLD
 
-func _is_floor_hit(hit: Dictionary) -> bool:
-	if hit.is_empty():
-		return false
-	return _is_floor_normal(hit.get("normal", Vector2.ZERO))
-
 func _try_attach_from_contacts() -> void:
 	if reattach_timer > 0.0:
 		return
@@ -919,15 +1078,17 @@ func _refresh_attached_contact() -> bool:
 	for index in range(get_slide_collision_count()):
 		var collision = get_slide_collision(index)
 		var normal = collision.get_normal()
-		if normal.dot(attached_normal) > 0.72:
-			attached_normal = _cardinalize_surface_normal(normal)
+		if normal.dot(attached_surface_normal) > 0.72:
+			attached_surface_normal = _cardinalize_surface_normal(normal)
 			attached_contact_point = collision.get_position()
+			surface_loss_grace_timer = surface_loss_grace_time
 			if state == PlayerState.CEILING:
 				ceiling_contact_grace_timer = ceiling_contact_grace_time
 			return true
 	return false
 
 func _jump_away_from_surface() -> void:
+	previous_surface_normal = attached_surface_normal
 	match state:
 		PlayerState.WALL_LEFT:
 			velocity = Vector2(wall_jump_horizontal_velocity, wall_jump_vertical_velocity)
@@ -1022,12 +1183,7 @@ func _clear_tail_data() -> void:
 	tail_length = tail_min_length
 
 func _get_surface_tangent() -> Vector2:
-	match state:
-		PlayerState.WALL_LEFT, PlayerState.WALL_RIGHT:
-			return Vector2.UP
-		PlayerState.CEILING:
-			return Vector2.RIGHT
-	return Vector2.ZERO
+	return _get_tangent_for_normal(attached_surface_normal)
 
 func _get_tangent_for_normal(normal: Vector2) -> Vector2:
 	if abs(normal.x) > abs(normal.y):
@@ -1035,16 +1191,22 @@ func _get_tangent_for_normal(normal: Vector2) -> Vector2:
 	return Vector2.RIGHT
 
 func _get_surface_input() -> float:
-	match state:
-		PlayerState.WALL_LEFT, PlayerState.WALL_RIGHT:
-			return _get_vertical_crawl_input() * _get_wall_crawl_speed()
-		PlayerState.CEILING:
-			return _get_horizontal_input() * _get_ceiling_crawl_speed()
+	var tangent = _get_surface_tangent()
+	if corner_input_grace_timer > 0.0:
+		var carried_input = surface_corner_carry_velocity.dot(tangent)
+		if not is_zero_approx(carried_input):
+			return carried_input
+	if abs(attached_surface_normal.x) > abs(attached_surface_normal.y):
+		return _get_vertical_crawl_input() * _get_wall_crawl_speed()
+	if attached_surface_normal == Vector2.DOWN:
+		return _get_horizontal_input() * _get_ceiling_crawl_speed()
 	return 0.0
 
 func _state_from_normal(normal: Vector2):
 	if normal.y > CEILING_NORMAL_THRESHOLD:
 		return PlayerState.CEILING
+	if normal.y < -FLOOR_NORMAL_THRESHOLD:
+		return PlayerState.GROUNDED
 	if normal.x > WALL_NORMAL_THRESHOLD:
 		return PlayerState.WALL_LEFT
 	if normal.x < -WALL_NORMAL_THRESHOLD:
@@ -1054,6 +1216,8 @@ func _state_from_normal(normal: Vector2):
 func _cardinalize_surface_normal(normal: Vector2) -> Vector2:
 	if normal.y > CEILING_NORMAL_THRESHOLD and abs(normal.y) >= abs(normal.x):
 		return Vector2.DOWN
+	if normal.y < -FLOOR_NORMAL_THRESHOLD and abs(normal.y) >= abs(normal.x):
+		return Vector2.UP
 	if normal.x > WALL_NORMAL_THRESHOLD:
 		return Vector2.RIGHT
 	if normal.x < -WALL_NORMAL_THRESHOLD:
@@ -1171,11 +1335,13 @@ func _add_camera() -> void:
 func _add_debug_state_label() -> void:
 	debug_state_label = get_node_or_null("DebugStateLabel") as Label
 	if debug_state_label:
+		debug_state_label.position = Vector2(-96, -104)
+		debug_state_label.size = Vector2(192, 64)
 		return
 	debug_state_label = Label.new()
 	debug_state_label.name = "DebugStateLabel"
-	debug_state_label.position = Vector2(-70, -78)
-	debug_state_label.size = Vector2(140, 20)
+	debug_state_label.position = Vector2(-96, -104)
+	debug_state_label.size = Vector2(192, 64)
 	debug_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	debug_state_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	debug_state_label.add_theme_color_override("font_color", Color("#d7f7cf"))
@@ -1227,24 +1393,45 @@ func _get_state_name() -> String:
 		suffix += " [CAPTURE]"
 	if surface_transition_lock_timer > 0.0 and _is_surface_state(state):
 		suffix += " [LOCK]"
+	if surface_loss_grace_timer > 0.0 and _is_surface_state(state):
+		suffix += " [GRACE]"
+	var normal_text = ""
+	if attached_surface_normal != Vector2.ZERO:
+		normal_text = "\nN %s" % _format_vector2(attached_surface_normal)
+	if last_corner_candidate_normal != Vector2.ZERO:
+		normal_text += "\n%s CAND %s" % [
+			corner_transition_kind if corner_transition_kind != "NONE" else "CORNER",
+			_format_vector2(last_corner_candidate_normal),
+		]
+	if last_corner_expected_normal != Vector2.ZERO:
+		normal_text += "\nEXPECT %s" % _format_vector2(last_corner_expected_normal)
 	match state:
 		PlayerState.GROUNDED:
-			return "GROUNDED" + suffix
+			return "GROUNDED" + suffix + normal_text
 		PlayerState.AIRBORNE:
 			return "AIRBORNE"
 		PlayerState.WALL_LEFT:
-			return "WALL_LEFT" + suffix
+			return "WALL_LEFT" + suffix + normal_text
 		PlayerState.WALL_RIGHT:
-			return "WALL_RIGHT" + suffix
+			return "WALL_RIGHT" + suffix + normal_text
 		PlayerState.CEILING:
-			return "CEILING" + suffix
+			return "CEILING" + suffix + normal_text
 		PlayerState.TAIL_HANG:
 			return "TAIL_HANG"
 		PlayerState.GRAPPLING:
 			return "GRAPPLING"
 		PlayerState.GRAPPLE_PULL:
 			return "GRAPPLE_PULL"
+		PlayerState.CORNER_TRANSITION:
+			return "%s_TRANSITION\nFROM %s\nTO %s" % [
+				corner_transition_kind,
+				_format_vector2(corner_transition_from_normal),
+				_format_vector2(corner_transition_to_normal),
+			]
 	return "UNKNOWN"
+
+func _format_vector2(value: Vector2) -> String:
+	return "(%.0f, %.0f)" % [value.x, value.y]
 
 func _draw() -> void:
 	if state == PlayerState.TAIL_HANG and tail_anchor != Vector2.ZERO:
@@ -1262,6 +1449,36 @@ func _draw() -> void:
 		var ratio = current_stamina / max(max_stamina, 1.0)
 		draw_rect(Rect2(bar_position, bar_size), Color(0.04, 0.05, 0.05, 0.75))
 		draw_rect(Rect2(bar_position + Vector2.ONE, Vector2((bar_size.x - 2.0) * ratio, bar_size.y - 2.0)), Color("#90d95a"))
+
+	if show_debug_state_label:
+		_draw_surface_debug()
+
+func _draw_surface_debug() -> void:
+	if attached_surface_normal != Vector2.ZERO:
+		draw_line(Vector2.ZERO, to_local(global_position + attached_surface_normal * 38.0), Color("#65d6ff"), 2.0)
+		draw_circle(to_local(attached_contact_point), 4.0, Color("#65d6ff"))
+	if last_corner_probe_from != Vector2.ZERO or last_corner_probe_to != Vector2.ZERO:
+		var probe_color = Color("#84ff8a") if last_corner_probe_hit else Color("#ff6b6b")
+		draw_line(to_local(last_corner_probe_from), to_local(last_corner_probe_to), probe_color, 1.5)
+	if last_corner_edge_point != Vector2.ZERO:
+		draw_circle(to_local(last_corner_edge_point), 4.0, Color("#ffffff"))
+		if last_corner_expected_normal != Vector2.ZERO:
+			draw_line(
+				to_local(last_corner_edge_point),
+				to_local(last_corner_edge_point + last_corner_expected_normal * 24.0),
+				Color("#ffffff"),
+				1.5
+			)
+	if last_corner_candidate_normal != Vector2.ZERO:
+		draw_circle(to_local(last_corner_candidate_point), 5.0, Color("#ffcc4d"))
+		draw_line(
+			to_local(last_corner_candidate_point),
+			to_local(last_corner_candidate_point + last_corner_candidate_normal * 30.0),
+			Color("#ffcc4d"),
+			2.0
+		)
+	if state == PlayerState.CORNER_TRANSITION:
+		draw_circle(to_local(corner_transition_target_position), 7.0, Color("#ff8fbd"))
 
 func _should_draw_stamina_bar() -> bool:
 	return current_stamina < max_stamina or stamina_bar_visible_timer > 0.0
