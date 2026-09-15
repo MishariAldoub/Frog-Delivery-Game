@@ -1445,12 +1445,12 @@ func _add_debug_state_label() -> void:
 	debug_state_label = get_node_or_null("DebugStateLabel") as Label
 	if debug_state_label:
 		debug_state_label.position = Vector2(-96, -104)
-		debug_state_label.size = Vector2(192, 64)
+		debug_state_label.size = Vector2(320, 136)
 		return
 	debug_state_label = Label.new()
 	debug_state_label.name = "DebugStateLabel"
 	debug_state_label.position = Vector2(-96, -104)
-	debug_state_label.size = Vector2(192, 64)
+	debug_state_label.size = Vector2(320, 136)
 	debug_state_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	debug_state_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	debug_state_label.add_theme_color_override("font_color", Color("#d7f7cf"))
@@ -1523,6 +1523,8 @@ func _get_state_name() -> String:
 			str(debug_direct_ceiling_attach),
 			str(debug_auto_tail_assist_attempted),
 		]
+	if tongue and tongue.has_method("get_debug_status_text"):
+		normal_text += "\n%s" % tongue.get_debug_status_text()
 	match state:
 		PlayerState.GROUNDED:
 			return "GROUNDED" + suffix + normal_text
@@ -1535,7 +1537,7 @@ func _get_state_name() -> String:
 		PlayerState.CEILING:
 			return "CEILING" + suffix + normal_text
 		PlayerState.TAIL_HANG:
-			return "TAIL_HANG"
+			return "TAIL_HANG" + suffix + normal_text
 		PlayerState.GRAPPLING:
 			return "GRAPPLING"
 		PlayerState.GRAPPLE_PULL:
@@ -1608,6 +1610,12 @@ func get_tongue_origin_global() -> Vector2:
 
 func is_ceiling_attached() -> bool:
 	return state == PlayerState.CEILING
+
+func is_tongue_ceiling_strangle_anchor_valid() -> bool:
+	return state == PlayerState.CEILING or state == PlayerState.TAIL_HANG or state == PlayerState.WALL_LEFT or state == PlayerState.WALL_RIGHT
+
+func should_airborne_grapple_use_full_range() -> bool:
+	return state == PlayerState.AIRBORNE
 
 func get_runner_x() -> float:
 	return global_position.x

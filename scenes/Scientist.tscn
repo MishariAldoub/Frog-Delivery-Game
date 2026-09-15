@@ -22,6 +22,9 @@ script = ExtResource("2_health")
 position = Vector2(0, -22)
 shape = SubResource("CapsuleShape2D_body")
 
+[node name="TongueNeckGrabPoint" type="Marker2D" parent="."]
+position = Vector2(0, -50)
+
 [node name="HearingArea" type="Area2D" parent="."]
 collision_layer = 0
 collision_mask = 1

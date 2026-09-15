@@ -64,6 +64,15 @@ enum GrabType {
 @export var grabbed_velocity_damping = 5.0
 @export var grabbed_max_speed = 640.0
 @export var ceiling_strangle_damage_per_second = 5.0
+@export var ceiling_strangle_reel_pull_strength = 38.0
+@export var ceiling_strangle_rope_tension_strength = 52.0
+@export var ceiling_strangle_velocity_damping = 14.0
+@export var ceiling_strangle_max_speed = 920.0
+@export var captured_swing_force_response = 1.0
+@export var captured_struggle_force = 90.0
+@export var captured_struggle_interval_min = 0.35
+@export var captured_struggle_interval_max = 0.95
+@export_range(0.0, 1.0, 0.05) var captured_struggle_randomness = 0.45
 @export var minimum_impact_speed = 220.0
 @export var impact_damage_multiplier = 0.045
 @export var max_impact_damage = 35.0
@@ -84,9 +93,19 @@ var has_destination = false
 var blocked_repath_timer = 0.0
 var routine_initialized = false
 var grabbed_target_position = Vector2.ZERO
+var grabbed_anchor_position = Vector2.ZERO
+var grabbed_tongue_length = 0.0
+var has_grabbed_tongue_anchor = false
+var grabbed_swing_force = Vector2.ZERO
 var grabbed_by: Node2D
 var recovery_timer = 0.0
 var impact_cooldown_timer = 0.0
+var captured_struggle_timer = 0.0
+var captured_struggle_force_current = Vector2.ZERO
+var captured_struggle_debug_timer = 0.0
+var last_impact_speed = 0.0
+var last_impact_damage = 0.0
+var default_floor_snap_length = 0.0
 
 var _work_points: Array[Node2D] = []
 var _wander_points: Array[Node2D] = []
@@ -96,6 +115,7 @@ var _health_component: HealthComponent
 
 func _ready() -> void:
 	super()
+	default_floor_snap_length = floor_snap_length
 	add_to_group("tongue_combat_target")
 	collision_layer = 2
 	collision_mask = 1
@@ -460,11 +480,12 @@ func _build_health_component() -> void:
 func _build_debug_label() -> void:
 	_debug_label = get_node_or_null("DebugAILabel") as Label
 	if _debug_label:
+		_debug_label.size = Vector2(210, 116)
 		return
 	_debug_label = Label.new()
 	_debug_label.name = "DebugAILabel"
 	_debug_label.position = Vector2(-86, -96)
-	_debug_label.size = Vector2(172, 58)
+	_debug_label.size = Vector2(210, 116)
 	_debug_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_debug_label.add_theme_color_override("font_color", Color("#fff2b8"))
 	_debug_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.9))
@@ -479,11 +500,17 @@ func _update_debug_label() -> void:
 	if not show_debug_ai:
 		return
 	if combat_state != CombatState.NORMAL:
-		_debug_label.text = "State: %s\nHP: %d / %d\nGrab type: %s" % [
+		_debug_label.text = "State: %s\nHP: %d / %d\nGrab type: %s\nAI suspended:%s\nVel:%.0f impact:%.0f dmg:%.1f\nStruggle:%s swing:%.0f" % [
 			_get_combat_state_name(),
 			int(round(get_current_health())),
 			int(round(get_max_health())),
 			_get_grab_type_name(),
+			str(is_ai_suspended_by_tongue()),
+			velocity.length(),
+			last_impact_speed,
+			last_impact_damage,
+			str(captured_struggle_debug_timer > 0.0),
+			grabbed_swing_force.length(),
 		]
 		return
 	var target_text = "none"
@@ -547,16 +574,32 @@ func get_tongue_target_position() -> Vector2:
 		return shape.global_position
 	return global_position + Vector2(0, -24)
 
+func get_tongue_neck_grab_position() -> Vector2:
+	var neck_marker = get_node_or_null("TongueNeckGrabPoint") as Marker2D
+	if neck_marker:
+		return neck_marker.global_position
+	return global_position + Vector2(0, -50)
+
 func begin_tongue_grab(grabber: Node2D, grab_kind: int, tongue_target_position: Vector2) -> bool:
 	if combat_state == CombatState.DEAD or not _health_component or _health_component.is_dead:
 		return false
 	grabbed_by = grabber
 	grab_type = grab_kind
 	grabbed_target_position = tongue_target_position
+	grabbed_anchor_position = Vector2.ZERO
+	grabbed_tongue_length = 0.0
+	has_grabbed_tongue_anchor = false
+	grabbed_swing_force = Vector2.ZERO
 	combat_state = CombatState.GRABBED
 	recovery_timer = 0.0
 	impact_cooldown_timer = 0.0
+	captured_struggle_timer = randf_range(captured_struggle_interval_min, captured_struggle_interval_max)
+	captured_struggle_force_current = Vector2.ZERO
+	captured_struggle_debug_timer = 0.0
+	last_impact_speed = 0.0
+	last_impact_damage = 0.0
 	has_destination = false
+	floor_snap_length = 0.0
 	clear_navigation_target()
 	player_visible = false
 	velocity *= 0.35
@@ -567,6 +610,19 @@ func update_tongue_grab(tongue_target_position: Vector2, delta: float) -> void:
 	if combat_state != CombatState.GRABBED:
 		return
 	grabbed_target_position = tongue_target_position
+	has_grabbed_tongue_anchor = false
+	grabbed_swing_force = Vector2.ZERO
+	if grab_type == GrabType.CEILING_STRANGLE:
+		take_damage(ceiling_strangle_damage_per_second * delta)
+
+func update_ceiling_tongue_grab(anchor_position: Vector2, tongue_length: float, tongue_endpoint: Vector2, swing_force: Vector2, delta: float) -> void:
+	if combat_state != CombatState.GRABBED:
+		return
+	grabbed_anchor_position = anchor_position
+	grabbed_tongue_length = max(tongue_length, 1.0)
+	grabbed_target_position = tongue_endpoint
+	has_grabbed_tongue_anchor = true
+	grabbed_swing_force = swing_force
 	if grab_type == GrabType.CEILING_STRANGLE:
 		take_damage(ceiling_strangle_damage_per_second * delta)
 
@@ -575,23 +631,87 @@ func release_tongue_grab() -> void:
 		return
 	grabbed_by = null
 	grabbed_target_position = Vector2.ZERO
+	grabbed_anchor_position = Vector2.ZERO
+	grabbed_tongue_length = 0.0
+	has_grabbed_tongue_anchor = false
+	grabbed_swing_force = Vector2.ZERO
+	captured_struggle_force_current = Vector2.ZERO
+	captured_struggle_debug_timer = 0.0
 	grab_type = GrabType.NORMAL
 	if _health_component and _health_component.is_dead:
 		combat_state = CombatState.DEAD
+		floor_snap_length = default_floor_snap_length
 		return
 	combat_state = CombatState.STUNNED
 	recovery_timer = recovery_stun_time
+	floor_snap_length = default_floor_snap_length
 	clear_navigation_target()
 
 func _update_grabbed(delta: float) -> void:
 	var previous_velocity = velocity
+	captured_struggle_debug_timer = max(captured_struggle_debug_timer - delta, 0.0)
 	velocity.y += gravity * delta
-	var displacement = grabbed_target_position - get_tongue_target_position()
-	var spring_velocity = displacement * grabbed_pull_strength
-	velocity = velocity.move_toward(spring_velocity, grabbed_velocity_damping * max(velocity.length(), 80.0) * delta)
-	velocity = velocity.limit_length(grabbed_max_speed)
+	if grab_type == GrabType.CEILING_STRANGLE:
+		_update_ceiling_strangle_motion(delta)
+	else:
+		var grabbed_point = get_tongue_target_position()
+		var displacement = grabbed_target_position - grabbed_point
+		var spring_velocity = displacement * grabbed_pull_strength
+		velocity = velocity.move_toward(spring_velocity, grabbed_velocity_damping * max(velocity.length(), 80.0) * delta)
+		velocity = velocity.limit_length(grabbed_max_speed)
 	move_and_slide()
 	_apply_impact_damage(previous_velocity)
+
+func _update_ceiling_strangle_motion(delta: float) -> void:
+	var neck_point = get_tongue_neck_grab_position()
+	var displacement = grabbed_target_position - neck_point
+	var target_velocity = displacement * ceiling_strangle_reel_pull_strength
+	var rope_direction = Vector2.ZERO
+
+	if has_grabbed_tongue_anchor:
+		var anchor_to_neck = neck_point - grabbed_anchor_position
+		var distance = anchor_to_neck.length()
+		if distance > 0.001:
+			rope_direction = anchor_to_neck / distance
+		if distance > grabbed_tongue_length and distance > 0.001:
+			var excess_length = distance - grabbed_tongue_length
+			target_velocity += -rope_direction * excess_length * ceiling_strangle_rope_tension_strength
+			var outward_speed = velocity.dot(rope_direction)
+			if outward_speed > 0.0:
+				velocity -= rope_direction * outward_speed
+
+	var external_force = _get_tangential_captured_force(grabbed_swing_force, rope_direction)
+	external_force += _update_captured_struggle_force(delta, rope_direction)
+
+	velocity = velocity.move_toward(
+		target_velocity,
+		ceiling_strangle_velocity_damping * max(velocity.length(), 100.0) * delta
+	)
+	velocity += external_force * captured_swing_force_response * delta
+	velocity = velocity.limit_length(ceiling_strangle_max_speed)
+
+func _get_tangential_captured_force(force: Vector2, rope_direction: Vector2) -> Vector2:
+	if force.length_squared() <= 0.001:
+		return Vector2.ZERO
+	if rope_direction.length_squared() <= 0.001:
+		return force
+	return force - rope_direction * force.dot(rope_direction)
+
+func _update_captured_struggle_force(delta: float, rope_direction: Vector2) -> Vector2:
+	captured_struggle_timer = max(captured_struggle_timer - delta, 0.0)
+	if captured_struggle_timer <= 0.0:
+		captured_struggle_timer = randf_range(captured_struggle_interval_min, captured_struggle_interval_max)
+		var random_direction = Vector2.from_angle(randf_range(0.0, TAU))
+		if rope_direction.length_squared() > 0.001:
+			var tangent = Vector2(-rope_direction.y, rope_direction.x)
+			random_direction = tangent * (1.0 if randf() >= 0.5 else -1.0)
+			random_direction = random_direction.slerp(Vector2.from_angle(randf_range(0.0, TAU)), captured_struggle_randomness).normalized()
+		captured_struggle_force_current = random_direction * captured_struggle_force * randf_range(0.65, 1.15)
+		captured_struggle_debug_timer = 0.18
+	if captured_struggle_debug_timer <= 0.0:
+		captured_struggle_force_current = Vector2.ZERO
+		return Vector2.ZERO
+	return _get_tangential_captured_force(captured_struggle_force_current, rope_direction)
 
 func _update_stunned(delta: float) -> void:
 	if not is_on_floor():
@@ -612,10 +732,12 @@ func _update_dead(delta: float) -> void:
 func _apply_impact_damage(previous_velocity: Vector2) -> void:
 	if impact_cooldown_timer > 0.0:
 		return
+	last_impact_speed = 0.0
 	for index in range(get_slide_collision_count()):
 		var collision = get_slide_collision(index)
 		var normal = collision.get_normal()
 		var impact_speed = max(0.0, previous_velocity.dot(-normal))
+		last_impact_speed = max(last_impact_speed, impact_speed)
 		if impact_speed < minimum_impact_speed:
 			continue
 		var collider = collision.get_collider()
@@ -624,6 +746,7 @@ func _apply_impact_damage(previous_velocity: Vector2) -> void:
 		var damage = clamp((impact_speed - minimum_impact_speed) * impact_damage_multiplier, 0.0, max_impact_damage)
 		if damage > 0.0:
 			take_damage(damage)
+			last_impact_damage = damage
 			impact_cooldown_timer = impact_damage_cooldown
 			return
 
@@ -634,9 +757,23 @@ func _on_health_changed(_current_health: float, _max_health: float) -> void:
 func _on_health_died() -> void:
 	combat_state = CombatState.DEAD
 	grabbed_by = null
+	grabbed_anchor_position = Vector2.ZERO
+	grabbed_tongue_length = 0.0
+	has_grabbed_tongue_anchor = false
+	grabbed_swing_force = Vector2.ZERO
+	captured_struggle_force_current = Vector2.ZERO
+	captured_struggle_debug_timer = 0.0
+	grab_type = GrabType.NORMAL
+	floor_snap_length = default_floor_snap_length
 	clear_navigation_target()
 	velocity *= 0.25
 	_update_debug_label()
+
+func is_tongue_grab_active() -> bool:
+	return combat_state == CombatState.GRABBED
+
+func is_ai_suspended_by_tongue() -> bool:
+	return combat_state == CombatState.GRABBED
 
 func _get_combat_state_name() -> String:
 	match combat_state:
